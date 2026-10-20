@@ -1,0 +1,332 @@
+{
+  "SCENARIO_1_STATELESS": {
+    "service": "checkout-worker",
+    "alert_name": "ContainerOOMKilled",
+    "telemetry": {
+      "metrics": {
+        "cpu_pct": 41.2,
+        "ram_pct": 94.7,
+        "ram_trend": "climbing +6%/min over last 20min",
+        "db_pool": { "used": 34, "max": 100 },
+        "http_5xx_rate": 0.18,
+        "http_504_count_5m": 42
+      },
+      "logs": [
+        "2026-10-20T03:11:02Z WARN  worker.batch: queue lag 1,842 msgs (consumer lag rising)",
+        "2026-10-20T03:11:44Z ERROR worker.batch: memory usage 1.87Gi / 2.0Gi limit",
+        "2026-10-20T03:12:03Z ERROR worker.cache: LRU eviction thrashing — hit ratio 11%",
+        "2026-10-20T03:12:31Z FATAL worker.batch: java.lang.OutOfMemoryError: GC overhead limit exceeded",
+        "2026-10-20T03:12:31Z INFO  kubelet: container checkout-worker-7f9c6d5b4-x2v1l OOMKilled (exit 137)",
+        "2026-10-20T03:12:40Z INFO  kubelet: container checkout-worker-7f9c6d5b4-m8kqz OOMKilled (exit 137)",
+        "2026-10-20T03:13:05Z WARN  hpa: cannot scale — metric queue_lag stale (pods restarting)"
+      ],
+      "topology": {
+        "service": "checkout-worker",
+        "upstream": ["checkout-api", "rabbitmq-orders"],
+        "downstream": ["orders-postgres (read-only)", "redis-cart-cache"]
+      }
+    },
+    "debate_transcript": [
+      {
+        "round_num": 1,
+        "speaker": "Forensics",
+        "model_used": "llama-3.3-70b-versatile",
+        "stance": "propose",
+        "argument": "stderr shows exit 137 OOMKilled on 2 of 12 stateless worker pods with RAM climbing +6%/min and LRU thrash. DB pool is healthy (34/100), so this is pure stateless compute exhaustion. Fastest MTTR: rolling restart of the 2 dead pods to restore consumers immediately.",
+        "proposed_action": "restart_pod on checkout-worker-7f9c6d5b4-x2v1l and checkout-worker-7f9c6d5b4-m8kqz"
+      },
+      {
+        "round_num": 2,
+        "speaker": "FinOps",
+        "model_used": "openai/gpt-oss-120b",
+        "stance": "counter",
+        "argument": "Agree on restart over scaling: HPA is flapping on a stale metric and adding pods at 94% RAM per-pod would schedule OOM-bound replicas (~$0.42/hr each, negative value). Restart of 2/12 pods touches 16.7% of the fleet, no stateful surface, instant rollback — well inside autonomous limits. Do NOT raise memory limits mid-incident; that is a capacity review, not a 3 AM action.",
+        "proposed_action": "Approve restart_pod (2 pods); veto any scale-out or memory-limit mutation tonight"
+      },
+      {
+        "round_num": 3,
+        "speaker": "Forensics",
+        "model_used": "llama-3.3-70b-versatile",
+        "stance": "refine",
+        "argument": "Refined: rolling restart strictly limited to the 2 OOMKilled pods, one at a time, 10s readiness gate between them. No HPA changes, no config edits. Root-cause memory-leak investigation deferred to business hours via a follow-up ticket.",
+        "proposed_action": "restart_pod [x2v1l, m8kqz] sequentially with readiness gates"
+      }
+    ],
+    "arbiter_decision": {
+      "winning_summary": "Consensus: 2 of 12 stateless checkout-worker pods were OOMKilled by a memory leak; DB and cache layers are healthy. Rolling restart of exactly the 2 dead pods restores queue consumption with zero stateful risk. Scaling and memory-limit changes are vetoed as out-of-scope for the incident window.",
+      "command_to_run": "kubectl rollout restart pod/checkout-worker-7f9c6d5b4-x2v1l pod/checkout-worker-7f9c6d5b4-m8kqz",
+      "mcp_tool_name": "restart_pod",
+      "mcp_tool_args": { "pods": ["checkout-worker-7f9c6d5b4-x2v1l", "checkout-worker-7f9c6d5b4-m8kqz"], "strategy": "rolling", "readiness_gate_seconds": 10 },
+      "target_service": "checkout-worker",
+      "affected_pods": 2,
+      "total_pods": 12,
+      "d_risk": 0.0,
+      "p_reversibility": 0.0,
+      "is_code_bug": false,
+      "offending_file": null,
+      "offending_line": null,
+      "live_engineer_briefing": "Tier 1 autonomous path — no briefing required (silent overnight fix, see Morning Digest)."
+    },
+    "sandbox_result": {
+      "sandbox_passed": true,
+      "execution_time_ms": 140,
+      "strike_number": 1,
+      "stdout_log": "[dry-run] parsed kubectl rollout restart: 2 targets matched label app=checkout-worker\n[dry-run] both pods in CrashLoopBackOff — restart is a no-op on running traffic\n[dry-run] 0 syntax errors, 0 destructive mutations detected",
+      "verification_badge": "PASS (140ms) — 0 Syntax Errors, 0 Destructive Mutations"
+    },
+    "execution_result": {
+      "tool": "restart_pod",
+      "status": "STABILIZED",
+      "duration_ms": 8120,
+      "stdout": "pod/checkout-worker-7f9c6d5b4-x2v1l restarted (ready in 6.1s)\npod/checkout-worker-7f9c6d5b4-m8kqz restarted (ready in 5.4s)\nqueue lag draining: 1,842 -> 212 msgs; RAM stable at 31%"
+    },
+    "final_report_md": "## ☀️ Morning Digest — INC-NEW (checkout-worker)\n\n**Tier:** TIER_1_AUTONOMOUS (silent overnight fix — no one was paged)\n**Blast Radius:** B = 0.4×(2/12) + 0.4×0.0 + 0.2×0.0 = **0.07** (threshold 0.40)\n\n### What happened\nTwo stateless `checkout-worker` pods were OOMKilled at 03:12 UTC by a memory leak (RAM +6%/min, GC overhead limit). Queue lag peaked at 1,842 messages.\n\n### What OAA did (autonomously)\n1. Diagnosed via read-only MCP telemetry (Forensics/FinOps agreed: restart, do not scale).\n2. Pre-flight dry-run **PASS (140ms)**.\n3. Rolling restart of the 2 dead pods — service stabilized in **8.1s**.\n\n### MTTR\n**11.4s** from webhook to stabilization. Zero human intervention.\n\n### Follow-up (business hours)\nMemory-leak root cause in `worker.batch` referred to service owners — not an OAA code-bug path (`is_code_bug=false`)."
+  },
+
+  "SCENARIO_2_STATEFUL_DB": {
+    "service": "orders-postgres",
+    "alert_name": "DatabaseConnectionPoolExhausted",
+    "telemetry": {
+      "metrics": {
+        "cpu_pct": 22.8,
+        "ram_pct": 61.0,
+        "db_pool": { "used": 99, "max": 100 },
+        "http_5xx_rate": 0.64,
+        "http_504_count_5m": 317,
+        "lock_waits": 96,
+        "blocking_pid": 4821
+      },
+      "logs": [
+        "2026-10-20T03:02:11Z ERROR pgbouncer: pooler checkout: client login timeout after 8000ms",
+        "2026-10-20T03:02:19Z WARN  postgres: process 4821 (etl_user@10.0.4.17) still holding AccessExclusiveLock on relation orders (age 47m12s)",
+        "2026-10-20T03:02:19Z DETAIL postgres: 96 backends waiting: LockRelation 16402",
+        "2026-10-20T03:02:44Z ERROR orders-api: sqlalchemy.exc.TimeoutError: QueuePool limit 100 overflow 0 — pool timeout 30s",
+        "2026-10-20T03:03:02Z ERROR nginx: upstream timed out (110: Connection timed out) — 504 returned",
+        "2026-10-20T03:03:31Z INFO  postgres: autovacuum blocked on orders by xid 88124411 (PID 4821)"
+      ],
+      "topology": {
+        "service": "orders-postgres",
+        "upstream": ["orders-api", "checkout-api", "pgbouncer"],
+        "downstream": ["wal-archive", "read-replica-1"]
+      }
+    },
+    "debate_transcript": [
+      {
+        "round_num": 1,
+        "speaker": "Forensics",
+        "model_used": "llama-3.3-70b-versatile",
+        "stance": "propose",
+        "argument": "Pool is 99/100 with 96 backends queued behind ONE blocker: PID 4821, an ETL session holding AccessExclusiveLock on `orders` for 47 minutes, even blocking autovacuum. Fastest recovery: terminate PID 4821 and reload PgBouncer. Scaling the app fleet does nothing — every new pod just joins the lock queue.",
+        "proposed_action": "kill_db_pid(4821), then reload pgbouncer"
+      },
+      {
+        "round_num": 2,
+        "speaker": "FinOps",
+        "model_used": "openai/gpt-oss-120b",
+        "stance": "counter",
+        "argument": "Hard veto on scale-out: 2x pods against the same lock doubles blocked connections and risks a retry storm (~$38/hr burn, zero MTTR gain, plus write-amplification risk on the primary). However, terminating a DB backend is a STATEFUL mutation: if 4821 is mid-DDL, rollback could take minutes. This must not run autonomously — a human must confirm the ETL job is killable.",
+        "proposed_action": "Route to Tier 2 HITL: kill_db_pid(4821) only after human approval; veto all scaling"
+      },
+      {
+        "round_num": 3,
+        "speaker": "Forensics",
+        "model_used": "llama-3.3-70b-versatile",
+        "stance": "refine",
+        "argument": "Refined: target ONLY PID 4821 via pg_terminate_backend — no other backend is touched, in-flight web transactions are unaffected. The ETL session is idle-in-transaction (last statement 46m ago), so rollback surface is minimal. Agreed: stateful d_risk=1.0 forces the human gate.",
+        "proposed_action": "kill_db_pid {pid: 4821, reload_pgbouncer: true} — pending HITL approval"
+      }
+    ],
+    "arbiter_decision": {
+      "winning_summary": "Consensus: connection-pool exhaustion is caused by a single blocking backend — ETL session PID 4821 holding AccessExclusiveLock on `orders` for 47m. Scaling is vetoed (retry-storm risk, zero benefit). Terminating PID 4821 is the correct fix but is a stateful mutation (d_risk=1.0), so it routes to Tier 2 for human approval.",
+      "command_to_run": "SELECT pg_terminate_backend(4821); -- then pgbouncer reload",
+      "mcp_tool_name": "kill_db_pid",
+      "mcp_tool_args": { "pid": 4821, "reload_pgbouncer": true },
+      "target_service": "orders-postgres",
+      "affected_pods": 1,
+      "total_pods": 8,
+      "d_risk": 1.0,
+      "p_reversibility": 0.3,
+      "is_code_bug": false,
+      "offending_file": null,
+      "offending_line": null,
+      "live_engineer_briefing": "🚨 **3:00 AM Briefing — INC-NEW (orders-postgres)**\n\n1. **Root cause:** ETL session **PID 4821** (`etl_user@10.0.4.17`) has held an AccessExclusiveLock on `orders` for 47 minutes. 96/99 pooled connections are queued behind it; the API is returning 504s.\n2. **Why scaling was vetoed:** more pods = more connections queued behind the same lock (retry-storm risk, ~$38/hr burn, zero MTTR gain).\n3. **Impact of approving:** `pg_terminate_backend(4821)` kills ONLY the idle ETL session + reloads PgBouncer. In-flight web transactions are untouched; pool recovery expected in <10s. The ETL job re-queues automatically at 04:00.\n\n✅ Pre-flight sandbox: **PASS (140ms) — 0 Syntax Errors, 0 Destructive Mutations**"
+    },
+    "sandbox_result": {
+      "sandbox_passed": true,
+      "execution_time_ms": 140,
+      "strike_number": 1,
+      "stdout_log": "[dry-run] parsed pg_terminate_backend(4821): single-PID target confirmed\n[dry-run] session 4821 = etl_user, idle in transaction 46m59s — rollback surface minimal\n[dry-run] 0 syntax errors, 0 destructive mutations detected",
+      "verification_badge": "PASS (140ms) — 0 Syntax Errors, 0 Destructive Mutations"
+    },
+    "execution_result": {
+      "tool": "kill_db_pid",
+      "status": "STABILIZED",
+      "duration_ms": 3240,
+      "stdout": "pg_terminate_backend(4821) -> t\npgbouncer: RELOAD completed\npool drained: 99/100 -> 17/100 in 2.8s; HTTP 504 rate -> 0.0"
+    },
+    "final_report_md": "## 🧾 HITL Post-Action Audit — INC-NEW (orders-postgres)\n\n**Tier:** TIER_2_HITL (stateful invariant: d_risk = 1.0)\n**Blast Radius:** B = 0.4×(1/8) + 0.4×1.0 + 0.2×0.3 = **0.51** (threshold 0.40 — also breached)\n\n### Human decision\n- **Decision:** APPROVED by on-call engineer\n- **Pre-flight badge:** PASS (140ms) — 0 Syntax Errors, 0 Destructive Mutations\n\n### What happened\nETL session PID 4821 held AccessExclusiveLock on `orders` for 47m; pool hit 99/100, API returned 504s (317 in 5m).\n\n### Action executed (post-approval)\n`pg_terminate_backend(4821)` + PgBouncer reload. Pool recovered 99→17 in 2.8s; 504 rate to zero.\n\n### MTTR\n**3.2s** execution after approval. Full timeline and debate transcript in the blackbox ledger."
+  },
+
+  "SCENARIO_3_CODE_BUG": {
+    "service": "pricing-api",
+    "alert_name": "CrashLoopBackOff",
+    "telemetry": {
+      "metrics": {
+        "cpu_pct": 12.4,
+        "ram_pct": 38.9,
+        "db_pool": { "used": 21, "max": 100 },
+        "http_5xx_rate": 0.41,
+        "http_504_count_5m": 12,
+        "restart_count": 14
+      },
+      "logs": [
+        "2026-10-20T04:41:07Z INFO  uvicorn: Started server process [1]",
+        "2026-10-20T04:41:09Z ERROR uvicorn: Application startup failed. Exiting.",
+        "Traceback (most recent call last):",
+        "  File \"app/services/pricing.py\", line 87, in compute_total",
+        "    tax = cart[\"tax\"]",
+        "KeyError: 'tax'",
+        "2026-10-20T04:41:11Z INFO  kubelet: container pricing-api-6c8f9b7d5-j4t8w restarted (count 14)",
+        "2026-10-20T04:41:11Z WARN  kubelet: backoff 5m0s — pod in CrashLoopBackOff"
+      ],
+      "topology": {
+        "service": "pricing-api",
+        "upstream": ["checkout-api", "admin-panel"],
+        "downstream": ["orders-postgres (read-only)", "redis-price-cache"]
+      }
+    },
+    "debate_transcript": [
+      {
+        "round_num": 1,
+        "speaker": "Forensics",
+        "model_used": "llama-3.3-70b-versatile",
+        "stance": "propose",
+        "argument": "The crash is deterministic: `KeyError: 'tax'` at app/services/pricing.py:87 on startup — a code bug, not infra. Live first-aid: restart the crashlooping pod to clear the wedged replica and serve from the healthy 9. Then this MUST get a Tier 3 code PR — restarting alone will not fix the exception path.",
+        "proposed_action": "restart_pod(pricing-api-6c8f9b7d5-j4t8w); flag is_code_bug=true with offending_file app/services/pricing.py:87"
+      },
+      {
+        "round_num": 2,
+        "speaker": "FinOps",
+        "model_used": "openai/gpt-oss-120b",
+        "stance": "counter",
+        "argument": "Concur on restart-only: scaling a CrashLoopBackOff deployment just burns replicas on a deterministic exception (~$0.38/hr each, pure waste). 1 of 10 pods affected, stateless, instant rollback — safely autonomous. Agree the follow-up belongs to a GitOps PR with pytest proof, NOT a live hot-patch.",
+        "proposed_action": "Approve single-pod restart (Tier 1); veto scale-out; defer fix to Tier 3 PR"
+      },
+      {
+        "round_num": 3,
+        "speaker": "Forensics",
+        "model_used": "llama-3.3-70b-versatile",
+        "stance": "refine",
+        "argument": "Refined: restart exactly the one crashlooping pod. Post-stabilization, the GitOps node patches `compute_total` to use `cart.get(\"tax\", 0.0)` with a regression pytest, verified in the sandbox before any PR opens.",
+        "proposed_action": "restart_pod [j4t8w] -> then Node 8: <=5-line diff + pytest + PR"
+      }
+    ],
+    "arbiter_decision": {
+      "winning_summary": "Consensus: deterministic `KeyError: 'tax'` at pricing.py:87 crash-loops one of ten stateless pods. Restart the single wedged pod now (Tier 1, B=0.04); the underlying code bug then gets a Tier 3 GitOps PR with sandbox-verified pytest. No live hot-patching.",
+      "command_to_run": "kubectl rollout restart pod/pricing-api-6c8f9b7d5-j4t8w",
+      "mcp_tool_name": "restart_pod",
+      "mcp_tool_args": { "pods": ["pricing-api-6c8f9b7d5-j4t8w"], "strategy": "single", "readiness_gate_seconds": 10 },
+      "target_service": "pricing-api",
+      "affected_pods": 1,
+      "total_pods": 10,
+      "d_risk": 0.0,
+      "p_reversibility": 0.0,
+      "is_code_bug": true,
+      "offending_file": "app/services/pricing.py",
+      "offending_line": 87,
+      "live_engineer_briefing": "Tier 1 autonomous path — no briefing required (Tier 3 PR follows stabilization; see Closure Dossier)."
+    },
+    "sandbox_result": {
+      "sandbox_passed": true,
+      "execution_time_ms": 140,
+      "strike_number": 1,
+      "stdout_log": "[dry-run] parsed kubectl rollout restart: 1 target matched label app=pricing-api\n[dry-run] pod in CrashLoopBackOff — restart affects no healthy traffic\n[dry-run] 0 syntax errors, 0 destructive mutations detected",
+      "verification_badge": "PASS (140ms) — 0 Syntax Errors, 0 Destructive Mutations"
+    },
+    "execution_result": {
+      "tool": "restart_pod",
+      "status": "STABILIZED",
+      "duration_ms": 6410,
+      "stdout": "pod/pricing-api-6c8f9b7d5-j4t8w restarted (ready in 5.9s)\nservice health: 10/10 pods Ready; HTTP 5xx rate -> 0.0\nNOTE: exception path still latent in image — Tier 3 PR required"
+    },
+    "patch_bundle": {
+      "file_path": "app/services/pricing.py",
+      "patch_diff": "--- a/app/services/pricing.py\n+++ b/app/services/pricing.py\n@@ -85,7 +85,7 @@\n def compute_total(cart: dict) -> float:\n     subtotal = sum(item[\"price\"] * item[\"qty\"] for item in cart[\"items\"])\n-    tax = cart[\"tax\"]\n+    tax = cart.get(\"tax\", 0.0)\n     return round(subtotal + tax, 2)",
+      "pytest_code": "from app.services.pricing import compute_total\n\n\ndef test_compute_total_without_tax_key():\n    cart = {\"items\": [{\"price\": 10.0, \"qty\": 2}]}\n    assert compute_total(cart) == 20.0\n\n\ndef test_compute_total_with_tax_key():\n    cart = {\"items\": [{\"price\": 10.0, \"qty\": 1}], \"tax\": 1.5}\n    assert compute_total(cart) == 11.5\n",
+      "pytest_passed": true,
+      "strike_count": 1,
+      "pr_url": "https://github.com/oneaboveall/pricing-api/pull/42",
+      "pr_markdown_report": "## 🐛 Fix: `KeyError: 'tax'` crash-loop in `compute_total`\n\n**Incident:** INC-NEW (pricing-api CrashLoopBackOff, 14 restarts)\n**Root cause:** `compute_total` assumed every cart carries a `tax` key; B2B guest carts omit it, raising `KeyError: 'tax'` at startup request warmup (pricing.py:87).\n\n### The fix (1 line)\n`cart[\"tax\"]` → `cart.get(\"tax\", 0.0)` — missing tax now defaults to 0.0 instead of raising.\n\n### Verification\n- [x] `pytest` — 2 passed in 0.42s (sandbox-verified, strike 1/3)\n- [x] Regression test covers both tax-present and tax-absent carts\n\n*Opened autonomously by OAA Node 8 (Tier 3 GitOps). Live service was stabilized first via Tier 1 restart — this PR removes the latent root cause.*"
+    },
+    "pytest_strikes": [
+      { "strike": 1, "passed": true, "stdout": "============================= test session starts ==============================\ncollected 2 items\n\ntest_pricing_fix.py ..                                                       [100%]\n\n============================== 2 passed in 0.42s ===============================" }
+    ],
+    "pytest_strikes_halted": [
+      { "strike": 1, "passed": false, "stdout": "test_pricing_fix.py .F\nFAILED test_pricing_fix.py::test_compute_total_with_tax_key - assert 10.0 == 11.5" },
+      { "strike": 2, "passed": false, "stdout": "test_pricing_fix.py F.\nFAILED test_pricing_fix.py::test_compute_total_without_tax_key - KeyError: 'tax'" },
+      { "strike": 3, "passed": false, "stdout": "test_pricing_fix.py FF\nFAILED test_pricing_fix.py::test_compute_total_without_tax_key - KeyError: 'tax'\nFAILED test_pricing_fix.py::test_compute_total_with_tax_key - assert 10.0 == 11.5" }
+    ],
+    "final_report_md": "## 📦 GitOps Incident Closure Dossier — INC-NEW (pricing-api)\n\n**Path:** TIER_1_AUTONOMOUS stabilization ➜ TIER_3 GitOps PR\n**Blast Radius (stabilization):** B = 0.4×(1/10) + 0.4×0.0 + 0.2×0.0 = **0.04**\n\n### 1. Live stabilization (Node 7)\nRestarted crashlooping pod `pricing-api-6c8f9b7d5-j4t8w`; fleet 10/10 Ready in 6.4s. HTTP 5xx → 0.\n\n### 2. Root cause\n`KeyError: 'tax'` at `app/services/pricing.py:87` — guest carts without a `tax` key crashed request warmup.\n\n### 3. The fix (Node 8, Tier 3)\n- Diff (1 line): `cart[\"tax\"]` → `cart.get(\"tax\", 0.0)`\n- `pytest`: **2 passed in 0.42s** (sandbox, strike 1/3)\n- PR: https://github.com/oneaboveall/pricing-api/pull/42\n\n### Policy note\nThe live container was never hot-patched — stabilization and source remediation are strictly separated."
+  },
+
+  "SEEDED_TICKETS": {
+    "INC-4818": {
+      "incident": {
+        "incident_id": "INC-4818",
+        "service": "inventory-sync",
+        "alert_name": "ContainerOOMKilled",
+        "status": "RESOLVED",
+        "selected_tier": "TIER_1_AUTONOMOUS",
+        "blast_radius_score": 0.07,
+        "is_code_bug": 0,
+        "strike_count": 0,
+        "max_strikes_override": 3,
+        "created_at": "2026-10-17 03:12:44",
+        "final_report_md": "## ☀️ Morning Digest — INC-4818 (inventory-sync)\n\n**Tier:** TIER_1_AUTONOMOUS (silent overnight fix)\n**Blast Radius:** B = 0.4×(2/12) + 0.4×0.0 + 0.2×0.0 = **0.07** (threshold 0.40)\n\n### What happened\nTwo `inventory-sync` worker pods OOMKilled at 03:12 UTC (memory leak, +6%/min). Queue lag peaked at 1,212 messages.\n\n### Autonomous action\nRolling restart of the 2 dead pods after a PASS (138ms) dry-run. Stabilized in 7.6s.\n\n### MTTR\n**10.8s** webhook-to-stable. Zero human intervention. Root-cause leak referred to service owners."
+      },
+      "snapshots": [
+        { "node_id": 1, "node_name": "ingest_node", "status": "COMPLETED", "elapsed_ms": 380, "timestamp": "2026-10-17 03:12:45", "state_json": { "incident_id": "INC-4818", "scenario_key": "SCENARIO_1_STATELESS", "service": "inventory-sync", "alert_name": "ContainerOOMKilled", "telemetry": { "metrics": { "cpu_pct": 39.1, "ram_pct": 93.2, "db_pool": { "used": 28, "max": 100 }, "http_5xx_rate": 0.11 }, "logs": ["FATAL worker.sync: java.lang.OutOfMemoryError: GC overhead limit exceeded", "kubelet: container inventory-sync-5d7c8f9b6-p3r7x OOMKilled (exit 137)", "kubelet: container inventory-sync-5d7c8f9b6-t9w2n OOMKilled (exit 137)"], "topology": { "service": "inventory-sync", "upstream": ["rabbitmq-inventory"], "downstream": ["orders-postgres (read-only)"] } } } },
+        { "node_id": 2, "node_name": "forensics_node", "status": "COMPLETED", "elapsed_ms": 2140, "timestamp": "2026-10-17 03:12:47", "state_json": { "incident_id": "INC-4818", "debate_transcript": [ { "round_num": 1, "speaker": "Forensics", "model_used": "llama-3.3-70b-versatile", "stance": "propose", "argument": "Exit 137 OOMKilled on 2/12 stateless pods; DB pool healthy at 28/100. Rolling restart restores consumers fastest.", "proposed_action": "restart_pod [p3r7x, t9w2n]" } ] } },
+        { "node_id": 3, "node_name": "finops_node", "status": "COMPLETED", "elapsed_ms": 2680, "timestamp": "2026-10-17 03:12:50", "state_json": { "incident_id": "INC-4818", "debate_transcript": [ { "round_num": 2, "speaker": "FinOps", "model_used": "openai/gpt-oss-120b", "stance": "counter", "argument": "Restart over scaling: 2/12 pods, no stateful surface, $0.42/hr per avoided OOM replica. Veto mid-incident memory-limit changes.", "proposed_action": "Approve restart_pod (2 pods); veto scale-out" } ] } },
+        { "node_id": 2, "node_name": "forensics_node", "status": "COMPLETED", "elapsed_ms": 1890, "timestamp": "2026-10-17 03:12:52", "state_json": { "incident_id": "INC-4818", "debate_transcript": [ { "round_num": 3, "speaker": "Forensics", "model_used": "llama-3.3-70b-versatile", "stance": "refine", "argument": "Sequential restart with 10s readiness gates; no HPA or config edits.", "proposed_action": "restart_pod [p3r7x, t9w2n] sequentially" } ] } },
+        { "node_id": 4, "node_name": "arbiter_node", "status": "COMPLETED", "elapsed_ms": 3120, "timestamp": "2026-10-17 03:12:55", "state_json": { "incident_id": "INC-4818", "arbiter_decision": { "winning_summary": "2/12 stateless inventory-sync pods OOMKilled; rolling restart, no scaling.", "command_to_run": "kubectl rollout restart pod/inventory-sync-5d7c8f9b6-p3r7x pod/inventory-sync-5d7c8f9b6-t9w2n", "mcp_tool_name": "restart_pod", "mcp_tool_args": { "pods": ["inventory-sync-5d7c8f9b6-p3r7x", "inventory-sync-5d7c8f9b6-t9w2n"], "strategy": "rolling", "readiness_gate_seconds": 10 }, "target_service": "inventory-sync", "affected_pods": 2, "total_pods": 12, "d_risk": 0.0, "p_reversibility": 0.0, "is_code_bug": false, "offending_file": null, "offending_line": null, "live_engineer_briefing": "Tier 1 autonomous path — no briefing required." } } },
+        { "node_id": 5, "node_name": "blast_radius_gate", "status": "COMPLETED", "elapsed_ms": 12, "timestamp": "2026-10-17 03:12:55", "state_json": { "incident_id": "INC-4818", "blast_radius_score": 0.07, "selected_tier": "TIER_1_AUTONOMOUS" } },
+        { "node_id": 6, "node_name": "sandbox_node", "status": "COMPLETED", "elapsed_ms": 138, "timestamp": "2026-10-17 03:12:56", "state_json": { "incident_id": "INC-4818", "sandbox_result": { "sandbox_passed": true, "execution_time_ms": 138, "strike_number": 1, "stdout_log": "[dry-run] 2 targets matched; 0 syntax errors, 0 destructive mutations", "verification_badge": "PASS (138ms) — 0 Syntax Errors, 0 Destructive Mutations" }, "hitl_decision": "AUTO_APPROVED" } },
+        { "node_id": 7, "node_name": "execution_node", "status": "COMPLETED", "elapsed_ms": 7640, "timestamp": "2026-10-17 03:13:03", "state_json": { "incident_id": "INC-4818", "execution_status": "STABILIZED" } },
+        { "node_id": 9, "node_name": "shared_reporting_node", "status": "COMPLETED", "elapsed_ms": 2210, "timestamp": "2026-10-17 03:13:05", "state_json": { "incident_id": "INC-4818", "final_post_mortem_report": "## ☀️ Morning Digest — INC-4818 (inventory-sync) ... (see final_report_md)" } },
+        { "node_id": 10, "node_name": "flight_ledger_node", "status": "COMPLETED", "elapsed_ms": 45, "timestamp": "2026-10-17 03:13:05", "state_json": { "incident_id": "INC-4818", "scenario_key": "SCENARIO_1_STATELESS", "service": "inventory-sync", "alert_name": "ContainerOOMKilled", "telemetry": { "metrics": { "cpu_pct": 39.1, "ram_pct": 93.2, "db_pool": { "used": 28, "max": 100 }, "http_5xx_rate": 0.11 }, "logs": ["FATAL worker.sync: java.lang.OutOfMemoryError: GC overhead limit exceeded"], "topology": { "service": "inventory-sync", "upstream": ["rabbitmq-inventory"], "downstream": ["orders-postgres (read-only)"] } }, "debate_transcript": [ { "round_num": 1, "speaker": "Forensics", "model_used": "llama-3.3-70b-versatile", "stance": "propose", "argument": "Exit 137 OOMKilled on 2/12 stateless pods; DB pool healthy at 28/100. Rolling restart restores consumers fastest.", "proposed_action": "restart_pod [p3r7x, t9w2n]" }, { "round_num": 2, "speaker": "FinOps", "model_used": "openai/gpt-oss-120b", "stance": "counter", "argument": "Restart over scaling: 2/12 pods, no stateful surface. Veto mid-incident memory-limit changes.", "proposed_action": "Approve restart_pod (2 pods); veto scale-out" }, { "round_num": 3, "speaker": "Forensics", "model_used": "llama-3.3-70b-versatile", "stance": "refine", "argument": "Sequential restart with 10s readiness gates; no HPA or config edits.", "proposed_action": "restart_pod [p3r7x, t9w2n] sequentially" } ], "arbiter_decision": { "winning_summary": "2/12 stateless inventory-sync pods OOMKilled; rolling restart, no scaling.", "command_to_run": "kubectl rollout restart pod/inventory-sync-5d7c8f9b6-p3r7x pod/inventory-sync-5d7c8f9b6-t9w2n", "mcp_tool_name": "restart_pod", "mcp_tool_args": { "pods": ["inventory-sync-5d7c8f9b6-p3r7x", "inventory-sync-5d7c8f9b6-t9w2n"], "strategy": "rolling", "readiness_gate_seconds": 10 }, "target_service": "inventory-sync", "affected_pods": 2, "total_pods": 12, "d_risk": 0.0, "p_reversibility": 0.0, "is_code_bug": false, "offending_file": null, "offending_line": null, "live_engineer_briefing": "Tier 1 autonomous path — no briefing required." }, "blast_radius_score": 0.07, "selected_tier": "TIER_1_AUTONOMOUS", "sandbox_result": { "sandbox_passed": true, "execution_time_ms": 138, "strike_number": 1, "stdout_log": "[dry-run] 2 targets matched; 0 syntax errors, 0 destructive mutations", "verification_badge": "PASS (138ms) — 0 Syntax Errors, 0 Destructive Mutations" }, "hitl_decision": "AUTO_APPROVED", "execution_status": "STABILIZED", "patch_bundle": null, "strike_count": 0, "max_strikes": 3, "prompt_hint": null, "final_post_mortem_report": "## ☀️ Morning Digest — INC-4818 (inventory-sync) ... (see final_report_md)" } }
+      ]
+    },
+
+    "INC-4815": {
+      "incident": {
+        "incident_id": "INC-4815",
+        "service": "pricing-api",
+        "alert_name": "CrashLoopBackOff",
+        "status": "HALTED_STRIKES",
+        "selected_tier": "TIER_1_AUTONOMOUS",
+        "blast_radius_score": 0.04,
+        "is_code_bug": 1,
+        "strike_count": 3,
+        "max_strikes_override": 3,
+        "created_at": "2026-10-18 14:03:11",
+        "final_report_md": "## ⛔ Circuit-Breaker Halt — INC-4815 (pricing-api)\n\n**Status:** HALTED_STRIKES — Node 8 exhausted 3/3 pytest strikes. Write/PR permissions revoked.\n\n### What succeeded\nLive service **was stabilized** (Tier 1 restart of pod `pricing-api-6c8f9b7d5-j4t8w`; fleet 10/10 Ready). Customers are NOT impacted.\n\n### What failed\nThe autonomous code fix for `KeyError: 'tax'` at `app/services/pricing.py:87` failed sandbox pytest 3 times:\n1. Strike 1: `assert 10.0 == 11.5` (tax-present case regressed)\n2. Strike 2: `KeyError: 'tax'` (fix not applied to the right branch)\n3. Strike 3: both cases failing\n\n### How to resume\nOpen `/history` → INC-4815 → Node 8 inspector → provide a prompt hint (e.g. `Use dict.get('tax', 0.0)`) → **[↻ Run 4th Try on Node 8 Now]**. This grants a one-time 4th strike for this ticket only."
+      },
+      "snapshots": [
+        { "node_id": 1, "node_name": "ingest_node", "status": "COMPLETED", "elapsed_ms": 392, "timestamp": "2026-10-18 14:03:11", "state_json": { "incident_id": "INC-4815", "scenario_key": "SCENARIO_3_CODE_BUG", "service": "pricing-api", "alert_name": "CrashLoopBackOff", "telemetry": { "metrics": { "cpu_pct": 12.4, "ram_pct": 38.9, "db_pool": { "used": 21, "max": 100 }, "http_5xx_rate": 0.41, "restart_count": 14 }, "logs": ["  File \"app/services/pricing.py\", line 87, in compute_total", "    tax = cart[\"tax\"]", "KeyError: 'tax'", "kubelet: container pricing-api-6c8f9b7d5-j4t8w restarted (count 14)"], "topology": { "service": "pricing-api", "upstream": ["checkout-api", "admin-panel"], "downstream": ["orders-postgres (read-only)", "redis-price-cache"] } } } },
+        { "node_id": 2, "node_name": "forensics_node", "status": "COMPLETED", "elapsed_ms": 2350, "timestamp": "2026-10-18 14:03:14", "state_json": { "incident_id": "INC-4815", "debate_transcript": [ { "round_num": 1, "speaker": "Forensics", "model_used": "llama-3.3-70b-versatile", "stance": "propose", "argument": "Deterministic KeyError: 'tax' at pricing.py:87 — code bug, not infra. Restart the wedged pod now; this needs a Tier 3 PR.", "proposed_action": "restart_pod(j4t8w); flag is_code_bug=true pricing.py:87" } ] } },
+        { "node_id": 3, "node_name": "finops_node", "status": "COMPLETED", "elapsed_ms": 2540, "timestamp": "2026-10-18 14:03:16", "state_json": { "incident_id": "INC-4815", "debate_transcript": [ { "round_num": 2, "speaker": "FinOps", "model_used": "openai/gpt-oss-120b", "stance": "counter", "argument": "Restart-only: scaling a CrashLoopBackOff deployment burns replicas on a deterministic exception. 1/10 pods, stateless — autonomous OK. Fix belongs in a PR with pytest proof.", "proposed_action": "Approve single-pod restart; veto scale-out; defer fix to Tier 3" } ] } },
+        { "node_id": 2, "node_name": "forensics_node", "status": "COMPLETED", "elapsed_ms": 1980, "timestamp": "2026-10-18 14:03:18", "state_json": { "incident_id": "INC-4815", "debate_transcript": [ { "round_num": 3, "speaker": "Forensics", "model_used": "llama-3.3-70b-versatile", "stance": "refine", "argument": "Restart the single pod; post-stabilization patch compute_total with cart.get(\"tax\", 0.0) plus regression pytest in the sandbox.", "proposed_action": "restart_pod [j4t8w] -> Node 8: <=5-line diff + pytest + PR" } ] } },
+        { "node_id": 4, "node_name": "arbiter_node", "status": "COMPLETED", "elapsed_ms": 3310, "timestamp": "2026-10-18 14:03:22", "state_json": { "incident_id": "INC-4815", "arbiter_decision": { "winning_summary": "Deterministic KeyError: 'tax' at pricing.py:87; restart one pod (Tier 1), then Tier 3 PR for the root cause.", "command_to_run": "kubectl rollout restart pod/pricing-api-6c8f9b7d5-j4t8w", "mcp_tool_name": "restart_pod", "mcp_tool_args": { "pods": ["pricing-api-6c8f9b7d5-j4t8w"], "strategy": "single", "readiness_gate_seconds": 10 }, "target_service": "pricing-api", "affected_pods": 1, "total_pods": 10, "d_risk": 0.0, "p_reversibility": 0.0, "is_code_bug": true, "offending_file": "app/services/pricing.py", "offending_line": 87, "live_engineer_briefing": "Tier 1 autonomous path — no briefing required." } } },
+        { "node_id": 5, "node_name": "blast_radius_gate", "status": "COMPLETED", "elapsed_ms": 11, "timestamp": "2026-10-18 14:03:22", "state_json": { "incident_id": "INC-4815", "blast_radius_score": 0.04, "selected_tier": "TIER_1_AUTONOMOUS" } },
+        { "node_id": 6, "node_name": "sandbox_node", "status": "COMPLETED", "elapsed_ms": 141, "timestamp": "2026-10-18 14:03:22", "state_json": { "incident_id": "INC-4815", "sandbox_result": { "sandbox_passed": true, "execution_time_ms": 141, "strike_number": 1, "stdout_log": "[dry-run] 1 target matched; 0 syntax errors, 0 destructive mutations", "verification_badge": "PASS (141ms) — 0 Syntax Errors, 0 Destructive Mutations" }, "hitl_decision": "AUTO_APPROVED" } },
+        { "node_id": 7, "node_name": "execution_node", "status": "COMPLETED", "elapsed_ms": 6380, "timestamp": "2026-10-18 14:03:29", "state_json": { "incident_id": "INC-4815", "execution_status": "STABILIZED" } },
+        { "node_id": 8, "node_name": "gitops_pr_node", "status": "COMPLETED", "elapsed_ms": 9120, "timestamp": "2026-10-18 14:03:38", "state_json": { "incident_id": "INC-4815", "strike_count": 1, "patch_bundle": { "file_path": "app/services/pricing.py", "patch_diff": "--- a/app/services/pricing.py\n+++ b/app/services/pricing.py\n@@ -85,7 +85,7 @@\n-    tax = cart[\"tax\"]\n+    tax = cart.get(\"tax\")", "pytest_code": "...", "pytest_passed": false, "strike_count": 1, "pr_url": null, "pr_markdown_report": "(strike 1 draft)" } } },
+        { "node_id": 8, "node_name": "gitops_pr_node", "status": "COMPLETED", "elapsed_ms": 8840, "timestamp": "2026-10-18 14:03:47", "state_json": { "incident_id": "INC-4815", "strike_count": 2, "patch_bundle": { "file_path": "app/services/pricing.py", "patch_diff": "--- a/app/services/pricing.py\n+++ b/app/services/pricing.py\n@@ -85,7 +85,7 @@\n-    tax = cart[\"tax\"]\n+    tax = cart.get(\"tax_rate\", 0.0)", "pytest_code": "...", "pytest_passed": false, "strike_count": 2, "pr_url": null, "pr_markdown_report": "(strike 2 draft — wrong key guess)" } } },
+        { "node_id": 8, "node_name": "gitops_pr_node", "status": "HALTED", "elapsed_ms": 8960, "timestamp": "2026-10-18 14:03:56", "state_json": { "incident_id": "INC-4815", "strike_count": 3, "patch_bundle": { "file_path": "app/services/pricing.py", "patch_diff": "--- a/app/services/pricing.py\n+++ b/app/services/pricing.py\n@@ -85,7 +85,7 @@\n-    tax = cart[\"tax\"]\n+    tax = cart.get(\"tax\") or 0.0", "pytest_code": "...", "pytest_passed": false, "strike_count": 3, "pr_url": null, "pr_markdown_report": "(strike 3 draft — still failing)" } } },
+        { "node_id": 9, "node_name": "shared_reporting_node", "status": "COMPLETED", "elapsed_ms": 2430, "timestamp": "2026-10-18 14:03:58", "state_json": { "incident_id": "INC-4815", "final_post_mortem_report": "## ⛔ Circuit-Breaker Halt — INC-4815 (pricing-api) ... (see final_report_md)" } },
+        { "node_id": 10, "node_name": "flight_ledger_node", "status": "COMPLETED", "elapsed_ms": 52, "timestamp": "2026-10-18 14:03:58", "state_json": { "incident_id": "INC-4815", "scenario_key": "SCENARIO_3_CODE_BUG", "service": "pricing-api", "alert_name": "CrashLoopBackOff", "telemetry": { "metrics": { "cpu_pct": 12.4, "ram_pct": 38.9, "db_pool": { "used": 21, "max": 100 }, "http_5xx_rate": 0.41, "restart_count": 14 }, "logs": ["  File \"app/services/pricing.py\", line 87, in compute_total", "    tax = cart[\"tax\"]", "KeyError: 'tax'", "kubelet: container pricing-api-6c8f9b7d5-j4t8w restarted (count 14)"], "topology": { "service": "pricing-api", "upstream": ["checkout-api", "admin-panel"], "downstream": ["orders-postgres (read-only)", "redis-price-cache"] } }, "debate_transcript": [ { "round_num": 1, "speaker": "Forensics", "model_used": "llama-3.3-70b-versatile", "stance": "propose", "argument": "Deterministic KeyError: 'tax' at pricing.py:87 — code bug, not infra. Restart the wedged pod now; this needs a Tier 3 PR.", "proposed_action": "restart_pod(j4t8w); flag is_code_bug=true pricing.py:87" }, { "round_num": 2, "speaker": "FinOps", "model_used": "openai/gpt-oss-120b", "stance": "counter", "argument": "Restart-only: scaling a CrashLoopBackOff deployment burns replicas on a deterministic exception. 1/10 pods, stateless — autonomous OK. Fix belongs in a PR with pytest proof.", "proposed_action": "Approve single-pod restart; veto scale-out; defer fix to Tier 3" }, { "round_num": 3, "speaker": "Forensics", "model_used": "llama-3.3-70b-versatile", "stance": "refine", "argument": "Restart the single pod; post-stabilization patch compute_total with cart.get(\"tax\", 0.0) plus regression pytest in the sandbox.", "proposed_action": "restart_pod [j4t8w] -> Node 8: <=5-line diff + pytest + PR" } ], "arbiter_decision": { "winning_summary": "Deterministic KeyError: 'tax' at pricing.py:87; restart one pod (Tier 1), then Tier 3 PR for the root cause.", "command_to_run": "kubectl rollout restart pod/pricing-api-6c8f9b7d5-j4t8w", "mcp_tool_name": "restart_pod", "mcp_tool_args": { "pods": ["pricing-api-6c8f9b7d5-j4t8w"], "strategy": "single", "readiness_gate_seconds": 10 }, "target_service": "pricing-api", "affected_pods": 1, "total_pods": 10, "d_risk": 0.0, "p_reversibility": 0.0, "is_code_bug": true, "offending_file": "app/services/pricing.py", "offending_line": 87, "live_engineer_briefing": "Tier 1 autonomous path — no briefing required." }, "blast_radius_score": 0.04, "selected_tier": "TIER_1_AUTONOMOUS", "sandbox_result": { "sandbox_passed": true, "execution_time_ms": 141, "strike_number": 1, "stdout_log": "[dry-run] 1 target matched; 0 syntax errors, 0 destructive mutations", "verification_badge": "PASS (141ms) — 0 Syntax Errors, 0 Destructive Mutations" }, "hitl_decision": "AUTO_APPROVED", "execution_status": "STABILIZED", "patch_bundle": { "file_path": "app/services/pricing.py", "patch_diff": "--- a/app/services/pricing.py\n+++ b/app/services/pricing.py\n@@ -85,7 +85,7 @@\n-    tax = cart[\"tax\"]\n+    tax = cart.get(\"tax\") or 0.0", "pytest_code": "...", "pytest_passed": false, "strike_count": 3, "pr_url": null, "pr_markdown_report": "(strike 3 draft — still failing)" }, "strike_count": 3, "max_strikes": 3, "prompt_hint": null, "final_post_mortem_report": "## ⛔ Circuit-Breaker Halt — INC-4815 (pricing-api) ... (see final_report_md)" } }
+      ]
+    }
+  }
+}
