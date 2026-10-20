@@ -1,12 +1,15 @@
 """OAA runtime configuration — env loading + RuntimeConfig manager API.
 
 Environment variables are loaded via pydantic-settings (see `.env.example`).
-The `RuntimeConfig` manager exposes get/update over the governance values owned
-by the `/config` page; Phase 2 backs it with the `runtime_config` SQLite table.
+The `RuntimeConfig` manager keeps an in-memory cache of the governance values
+owned by the `/config` page and is backed by the `runtime_config` SQLite table
+(singleton row id=1) via `hydrate_from_db()` / `update_and_persist()`.
+
+Node code reads the synchronous cache through `get_runtime_config()`.
 """
 
 from functools import lru_cache
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -35,12 +38,7 @@ def get_settings() -> Settings:
 
 
 class RuntimeConfig:
-    """Governance config manager.
-
-    Phase 1: process-local in-memory store seeded from env.
-    Phase 2: `_load_from_db` / `_persist_to_db` get wired to the
-    `runtime_config` table in core/database.py (singleton row id=1).
-    """
+    """Governance config manager (in-memory cache + SQLite persistence)."""
 
     def __init__(self) -> None:
         settings = get_settings()
@@ -49,22 +47,31 @@ class RuntimeConfig:
             global_max_strikes=settings.global_max_strikes,
             mock_env=settings.mock_env,
         )
-        self._db_persist = False  # flipped on by database.init_db() in Phase 2
 
     def get(self) -> RuntimeConfigModel:
         return self._model.model_copy(deep=True)
 
     def update(self, patch: Dict[str, Any]) -> RuntimeConfigModel:
+        """Memory-only update (call `update_and_persist` to also write the DB)."""
         merged = self._model.model_dump()
         merged.update({k: v for k, v in patch.items() if k in merged})
         self._model = RuntimeConfigModel(**merged)
-        if self._db_persist:
-            self._persist_to_db()
         return self.get()
 
-    # --- Phase 2 hooks (implemented in core/database.py wiring) -------------
-    def _persist_to_db(self) -> None:  # pragma: no cover - wired in Phase 2
-        raise NotImplementedError("DB persistence lands in Phase 2")
+    async def hydrate_from_db(self) -> RuntimeConfigModel:
+        """Load the persisted singleton row into the cache (call after init_db)."""
+        from app.core import database  # local import avoids a circular dependency
+
+        self._model = await database.get_runtime_config()
+        return self.get()
+
+    async def update_and_persist(self, patch: Dict[str, Any]) -> RuntimeConfigModel:
+        """Update the cache and persist atomically to runtime_config (id=1)."""
+        from app.core import database  # local import avoids a circular dependency
+
+        self.update(patch)
+        self._model = await database.update_runtime_config(self._model)
+        return self.get()
 
 
 @lru_cache
@@ -73,5 +80,5 @@ def get_runtime_config_manager() -> RuntimeConfig:
 
 
 def get_runtime_config() -> RuntimeConfigModel:
-    """Convenience accessor used by nodes (e.g. Node 5 reads blast_threshold)."""
+    """Synchronous accessor used by nodes (e.g. Node 5 reads blast_threshold)."""
     return get_runtime_config_manager().get()

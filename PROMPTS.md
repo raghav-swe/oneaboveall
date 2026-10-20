@@ -107,7 +107,7 @@ Any node logic, MCP server/client code, API routes, React components/pages, or d
 1. **`backend/app/core/database.py`**
    - `init_db()`: executes `PRAGMA journal_mode=WAL;` (+ `PRAGMA synchronous=NORMAL;`), creates the three tables **verbatim** from CONTEXT §5 (`incidents`, `node_snapshots`, `runtime_config`), and inserts the singleton `runtime_config` row (`id=1`, defaults from env) if absent.
    - **Seeding (idempotent):** on init, if `incidents` is empty, insert `INC-4818` and `INC-4815` with their complete `node_snapshots` chains from `scenarios.json.SEEDED_TICKETS` (INC-4818: RESOLVED/TIER_1_AUTONOMOUS; INC-4815: HALTED_STRIKES with `strike_count=3`, `max_strikes_override=3`).
-   - Async CRUD helpers (`aiosqlite`, per-call connections, `row_factory=aiosqlite.Row`): `create_incident`, `update_incident_status`, `set_final_report`, `insert_node_snapshot`, `list_incidents(tier: str | None)`, `get_incident`, `get_snapshots(incident_id)`, `get_latest_snapshot(incident_id)`, `get_runtime_config`, `update_runtime_config`, `next_incident_id()` (`INC-<max+1>`, aware of seeds → next is `INC-4820`), and `get_last_healthy_summary()` (latest RESOLVED ticket digest for the idle dashboard bento).
+   - Async CRUD helpers (`aiosqlite`, per-call connections, `row_factory=aiosqlite.Row`): `create_incident`, `update_incident_status`, `set_final_report`, `insert_node_snapshot`, `list_incidents(tier: str | None)`, `get_incident`, `get_snapshots(incident_id)`, `get_latest_snapshot(incident_id)`, `get_runtime_config`, `update_runtime_config`, `next_incident_id()` (`INC-<max+1>`, aware of seeds → next is `INC-4819`, matching CONTEXT §6's ingest example), and `get_last_healthy_summary()` (latest RESOLVED ticket digest for the idle dashboard bento).
    - Wire `core/config.py`'s `RuntimeConfig` manager to these helpers.
 
 2. **`backend/app/mcp/server.py`** — FastMCP server exposing the six tools with **exact** names: `get_pod_metrics`, `get_container_logs`, `get_cluster_topology`, `restart_pod`, `kill_db_pid`, `flush_redis_cache`.
@@ -125,7 +125,7 @@ Any node logic, MCP server/client code, API routes, React components/pages, or d
 
 4. **`backend/tests/test_mcp_firewall.py`** — node 1/2/3 calling each mutating tool raises `PermissionError`; node 7 succeeds; read-only tools callable from nodes 1–3; a tool toggled off in `enabled_tools` is blocked; unknown tool name raises.
 
-5. **`backend/tests/test_database.py`** — WAL mode confirmed (`PRAGMA journal_mode` → `wal`); exactly 2 seeded incidents on fresh init; seeding is idempotent (second `init_db()` adds nothing); CRUD roundtrip; `next_incident_id()` → `INC-4820`; `runtime_config` singleton read/update roundtrip.
+5. **`backend/tests/test_database.py`** — WAL mode confirmed (`PRAGMA journal_mode` → `wal`); exactly 2 seeded incidents on fresh init; seeding is idempotent (second `init_db()` adds nothing); CRUD roundtrip; `next_incident_id()` → `INC-4819`; `runtime_config` singleton read/update roundtrip.
 
 ### Verification Gate
 1. `uv run pytest backend/tests/ -v` — all green.
