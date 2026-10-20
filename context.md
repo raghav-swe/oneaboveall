@@ -29,13 +29,15 @@
 - **Repository Pattern:** Single Monorepo (`/backend` and `/frontend`) to guarantee 1:1 schema synchronization between Python Pydantic v2 models and TypeScript interfaces.
 
 ### Backend Stack (`/backend`)
-- **Language & Runtime:** Python 3.11+
+- **Language & Runtime:** Python 3.11+ (workspace: CPython 3.13 on Windows; invoke via `python` / `py`)
+- **Dependency Management:** `uv` with `pyproject.toml` as the source of truth (`uv.lock` pins exact versions); `requirements.txt` is generated via `uv export` for parity
 - **Web Framework:** FastAPI + Uvicorn (REST API + asynchronous Server-Sent Events `text/event-stream`).
 - **Agent Orchestration:** LangGraph (`StateGraph`, parallel fan-out/fan-in, `add_conditional_edges`, native `interrupt()` for Tier 2 HITL pausing).
 - **Schema Validation:** Pydantic v2 (strict structured outputs for all LLM calls).
 - **Tool Protocol:** FastMCP (`mcp` SDK) separating Read-Only Diagnostic Tools from Mutating Execution Tools.
-- **Sandbox Engine:** Docker Engine / Subprocess runner executing pre-flight command dry-runs (Node 6) and isolated `pytest` verification loops (Node 8).
+- **Sandbox Engine:** Pluggable `SandboxRunner` interface — `MockDriver` (deterministic fixtures, **default** under `MOCK_ENV=true`) and `DockerDriver` (Docker Engine / subprocess, coded to spec but engaged only when a Docker daemon is reachable) — executing pre-flight command dry-runs (Node 6) and isolated `pytest` verification loops (Node 8).
 - **Persistence & Blackbox Ledger:** SQLite (`oaa_blackbox.db`) configured in **Write-Ahead Logging (`PRAGMA journal_mode=WAL;`)** mode for concurrent read/write safety.
+- **Graph Checkpointer:** LangGraph `AsyncSqliteSaver` on a dedicated `checkpoints.db` (also WAL) so Tier 2 `interrupt()` pauses survive server restarts; `oaa_blackbox.db` remains a pure audit ledger and never stores checkpoint state.
 
 ### Quad-Model Specialized LLM Routing Strategy
 | Node / Role | Primary Model | Provider / Engine | Rationale & Configuration |
@@ -47,9 +49,9 @@
 | **Node 9: Shared Reporting** | `gemini-2.5-flash` | Google AI Studio | Formats deterministic state variables into the final Markdown Post-Mortem Dossier. |
 
 ### Frontend Stack (`/frontend`)
-- **Framework:** Next.js 15 (App Router, TypeScript).
-- **Styling & UI:** Tailwind CSS (Dark-mode SRE theme `#070b14` / `#090d16`), `lucide-react` icons.
-- **Interactive DAG Canvas:** `@xyflow/react` (React Flow) for the `n8n`-style 10-node workflow replay and live node inspection on `/history`.
+- **Framework:** Next.js 15 (App Router, TypeScript), npm-managed.
+- **Styling & UI:** Tailwind CSS **v3.4** (config-file style; do **not** use v4 CSS-first), Dark-mode SRE theme `#070b14` / `#090d16`, `lucide-react` icons.
+- **Interactive DAG Canvas:** `@xyflow/react` (React Flow, React-19-compatible release) for the `n8n`-style 10-node workflow replay and live node inspection on `/history`.
 - **Real-Time Transport:** Native browser `EventSource` / custom `useIncidentSSE` hook subscribing to FastAPI SSE streams.
 
 ---
@@ -145,13 +147,14 @@
 
 ### Node-by-Node Execution Rules
 1. **Node 1 (`ingest_node`):** Receives webhook alert, calls FastMCP Read-Only tools (`get_pod_metrics`, `get_container_logs`, `get_cluster_topology`), and populates `OAAState.telemetry`.
-2. **Nodes 2 & 3 (`forensics_node` & `finops_node`):** Execute a 3-turn adversarial exchange (Round 1: Forensics proposes fix -> Round 2: FinOps counters with quota/cost/cascade math -> Round 3: Forensics refines technical proposal).
+2. **Nodes 2 & 3 (`forensics_node` & `finops_node`):** Execute a 3-turn adversarial exchange (Round 1: Forensics proposes fix -> Round 2: FinOps counters with quota/cost/cascade math -> Round 3: Forensics refines technical proposal). **Execution is strictly sequential** (`N2 R1 -> N3 R2 -> N2 R3`) so each round sees the previous one; the parallel fan-out/fan-in shown in the topology diagram is visual-only.
 3. **Node 4 (`arbiter_node`):** Gemini 2.5 Flash outputs structured `ArbiterVerdict`, locking in `command_to_run`, `affected_pods`, `total_pods`, `d_risk`, `p_reversibility`, `is_code_bug`, and `live_engineer_briefing`.
 4. **Node 5 (`blast_radius_gate`):** Pure Python math ($0\%$ LLM):
    $$B = 0.40 \cdot \left(\frac{N_{\text{affected}}}{N_{\text{total}}}\right) + 0.40 \cdot D_{\text{risk}} + 0.20 \cdot P_{\text{reversibility}}$$
    - **Hard Safety Invariants:** If `d_risk == 1.0` (touches stateful DB) OR `(affected_pods / total_pods) > 0.25` OR `B > runtime_config.blast_threshold` (default `0.40`), strictly route to `TIER_2_HITL`. Otherwise route to `TIER_1_AUTONOMOUS`.
 5. **Node 6 (`sandbox_node`):** Both Tier 1 and Tier 2 converge here first. Performs pre-flight dry-run simulation of `command_to_run`.
    - If `selected_tier == "TIER_2_HITL"`, calls LangGraph `interrupt()` *after* attaching the green Sandbox Dry-Run PASS badge to the 3:00 AM Live Briefing, pausing execution until the human clicks Approve or Reject.
+   - If the dry-run itself **fails**, increment `strike_count`; at `max_strikes`, revoke write permissions and route to Node 9 as `HALTED_STRIKES`. Node 6 never re-invokes the Arbiter for an alternative command.
 6. **Node 7 (`execution_node`):** Invokes FastMCP Mutating Tools (`restart_pod`, `kill_db_pid`, `flush_redis_cache`) to stabilize the live service.
 7. **Check Block (`check_if_pr_needed`):** Conditional edge after Node 7 inspecting `state["arbiter_decision"]["is_code_bug"]`.
    - If `True` -> routes to **Node 8 (`gitops_pr_node`)** then **Node 9**.
@@ -310,7 +313,7 @@ class OAAState(TypedDict):
     blast_radius_score: float
     selected_tier: str  # "TIER_1_AUTONOMOUS" | "TIER_2_HITL"
     sandbox_result: Dict[str, Any]
-    hitl_decision: Optional[str]  # "APPROVED" | "REJECTED" | None
+    hitl_decision: Optional[str]  # "APPROVED" | "REJECTED" | "AUTO_APPROVED" (Tier 1 only) | None
     execution_status: str
     patch_bundle: Optional[Dict[str, Any]]
     strike_count: int
@@ -333,6 +336,8 @@ class OAAState(TypedDict):
 | `GET` / `PUT` | `/api/v1/config` | Fetches or updates global `/config` sliders & flags | `RuntimeConfigModel` JSON | Updated `RuntimeConfigModel` JSON |
 | `POST` | `/api/v1/support/quick-fix` | Executes 1-click self-heal action on `/support` | `{"action": "RESTART_MCP" \| "PURGE_SANDBOX" \| "UNLOCK_SQLITE" \| "ENABLE_MOCK_ENV"}` | `{"status": "SUCCESS", "message": "...", "timestamp": "..."}` |
 
+**Transport & Port Bindings:** Backend binds `:8000`, frontend `:3000`. Next.js `rewrites()` proxies `/api/*` to `:8000`, so the browser never faces CORS or SSE proxy-buffering issues. Every SSE response must send `Cache-Control: no-cache` and `X-Accel-Buffering: no`, and emit a heartbeat comment at least every 15 s so multi-hour Tier 2 pauses never drop the connection.
+
 ---
 
 ## 7. Locked Monorepo Directory Structure
@@ -347,6 +352,7 @@ one-above-all/
 │   ├── pyproject.toml
 │   ├── requirements.txt
 │   ├── oaa_blackbox.db
+│   ├── checkpoints.db
 │   ├── app/
 │   │   ├── __init__.py
 │   │   ├── main.py                  # FastAPI app, CORS, REST & SSE routes
@@ -376,9 +382,10 @@ one-above-all/
 │   │   │       └── node_10_ledger.py
 │   │   └── mocks/
 │   │       └── scenarios.json       # Deterministic fixtures for Scenarios 1, 2, 3 & Halted Ticket
-│   └── sandbox/
+│   ├── sandbox/
 │       ├── Dockerfile
 │       └── runner.py
+│   └── tests/                   # Phase-gate pytest suites + smoke_api.py
 └── frontend/
     ├── package.json
     ├── tsconfig.json
@@ -417,7 +424,7 @@ one-above-all/
 ## 8. Coding Conventions & Guardrails for AI Agents
 
 1. **Strict Type & Schema Parity:** Every modification to `backend/app/schemas/models.py` MUST be mirrored in `frontend/src/types/oaa.ts` in the same commit.
-2. **Offline-First Determinism (`MOCK_ENV=true`):** Every node (Nodes 1–10) must work 100% offline when `MOCK_ENV=true` by reading `backend/app/mocks/scenarios.json` and awaiting `asyncio.sleep(0.35)` so SSE animations stream realistically on the frontend even without cloud API keys.
+2. **Offline-First Determinism (`MOCK_ENV=true`):** Every node (Nodes 1–10) must work 100% offline when `MOCK_ENV=true` by reading `backend/app/mocks/scenarios.json` and awaiting `asyncio.sleep(0.35)` so SSE animations stream realistically on the frontend even without cloud API keys. Nodes always invoke tools through the **real FastMCP client/server path** (so the Zero-Privilege-Escalation firewall is exercised on every run); the tool implementations read fixtures internally. LLM clients in `llm_factory.py` are fully wired but **dormant** — never instantiated while `MOCK_ENV=true`; `.env.example` documents `GROQ_API_KEY` / `GOOGLE_API_KEY` for future live mode.
 3. **Zero LLM Math:** Never ask an LLM to calculate $B$ or select `TIER_1` vs `TIER_2`. Node 5 (`node_05_blast_radius.py`) must be 100% pure Python arithmetic reading `runtime_config.blast_threshold`.
 4. **Role-Gated MCP Calls:** `mcp/client.py` must require `caller_node: int`. If `caller_node != 7` attempts to invoke `restart_pod`, `kill_db_pid`, or `flush_redis_cache`, raise a `PermissionError("Zero Privilege Escalation Invariant Violation")`.
 5. **Pre-Seeded Historical Tickets:** On SQLite initialization (`database.py`), automatically seed 2 completed historical tickets (`INC-4818` Tier 1 Auto-Healed, and `INC-4815` Halted at 3/3 Strikes on Node 8) so `/dashboard` ("Last Healthy Request") and `/history` ("Run 4th Try on Node 8") are immediately testable on first boot.
@@ -427,7 +434,8 @@ one-above-all/
 ## 9. Current Status & 8-Phase Implementation Roadmap
 
 ### Status
-- **Architecture & Specifications:** 100% Locked (`CONTEXT.md`, `ARCHITECTURE.md`, UI/UX Specification, 8-Phase Playbook).
+- **Architecture & Specifications:** 100% Locked (`CONTEXT.md`, `ARCHITECTURE.md`, UI/UX Specification, 8-Phase Playbook). Prompt 0 engineering decisions (uv tooling, sequential debate execution, dedicated checkpoint DB, pluggable sandbox, transport bindings, mock-only LLM posture) are integrated into both spec documents and enumerated in `PROMPTS.md` §0.
+- **Version Control:** Git repository initialized; the baseline commit holds the spec documents and `PROMPTS.md` only. One commit per phase, created strictly after that phase's verification gate passes and the user approves the commit.
 - **Codebase Status:** Ready for Phase 1 initialization.
 
 ### Sequential Execution Phases (1 Phase = 1 Git Commit)

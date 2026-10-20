@@ -104,11 +104,13 @@
 | **Node 3** | `finops_node`<br>(`node_03_finops.py`) | Groq LPU: `openai/gpt-oss-120b` | `service`, `telemetry`, `debate_transcript` | Appends FinOps `DebateMessage` (Round 2 counter) to `debate_transcript` | Fan-in convergence to **Node 4**. |
 | **Node 4** | `arbiter_node`<br>(`node_04_arbiter.py`) | Google AI Studio: `gemini-2.5-flash` (`temperature=0.0`, `.with_structured_output(ArbiterVerdict)`) | `telemetry`, `debate_transcript` | `arbiter_decision` (includes `is_code_bug` and `live_engineer_briefing`) | Single edge to **Node 5**. |
 | **Node 5** | `blast_radius_gate`<br>(`node_05_blast_radius.py`) | **100% Pure Python Math** ($0\%$ LLM) | `arbiter_decision`, `runtime_config.blast_threshold` | `blast_radius_score`, `selected_tier` (`TIER_1_AUTONOMOUS` or `TIER_2_HITL`) | Conditional split (Track A / Track B) converging into **Node 6**. |
-| **Node 6** | `sandbox_node`<br>(`node_06_sandbox.py`) | Docker / Subprocess Dry-Run + LangGraph `interrupt()` | `arbiter_decision`, `selected_tier`, `strike_count`, `max_strikes` | `sandbox_result`, `hitl_decision` (`APPROVED` / `REJECTED`) | If `APPROVED` (or Tier 1) $\rightarrow$ **Node 7**. If `REJECTED` or Strikes $\ge$ Max $\rightarrow$ **Node 9**. |
+| **Node 6** | `sandbox_node`<br>(`node_06_sandbox.py`) | `SandboxRunner` Dry-Run (MockDriver default / DockerDriver when a daemon exists) + LangGraph `interrupt()` | `arbiter_decision`, `selected_tier`, `strike_count`, `max_strikes` | `sandbox_result`, `hitl_decision` (`APPROVED` / `REJECTED`) | If `APPROVED` (or Tier 1) $\rightarrow$ **Node 7**. If `REJECTED` or Strikes $\ge$ Max $\rightarrow$ **Node 9**. |
 | **Node 7** | `execution_node`<br>(`node_07_execution.py`) | FastMCP Mutating Tools (`caller_node=7` **ONLY**) | `arbiter_decision`, `selected_tier`, `hitl_decision` | `execution_status` (`STABILIZED` / `FAILED`) | Conditional edge `check_if_pr_needed` (`is_code_bug == True?`). |
-| **Node 8** | `gitops_pr_node`<br>(`node_08_gitops_pr.py`) | Groq LPU: `qwen/qwen3-32b` + Docker `pytest` loop | `arbiter_decision`, `telemetry`, `strike_count`, `max_strikes`, `prompt_hint` | `patch_bundle` (`CodePatchBundle`), `strike_count` | Direct edge to **Node 9**. |
+| **Node 8** | `gitops_pr_node`<br>(`node_08_gitops_pr.py`) | Groq LPU: `qwen/qwen3-32b` + `SandboxRunner` `pytest` loop | `arbiter_decision`, `telemetry`, `strike_count`, `max_strikes`, `prompt_hint` | `patch_bundle` (`CodePatchBundle`), `strike_count` | Direct edge to **Node 9**. |
 | **Node 9** | `shared_reporting_node`<br>(`node_09_reporting.py`) | Google AI Studio: `gemini-2.5-flash` | Full `OAAState` | `final_post_mortem_report` (Markdown string) | Direct edge to **Node 10**. |
 | **Node 10** | `flight_ledger_node`<br>(`node_10_ledger.py`) | SQLite WAL Engine (`oaa_blackbox.db`) | Full `OAAState` | Finalizes `incidents` row & commits `node_snapshots` | `END` |
+
+**Debate Execution Order (binding clarification):** Although the topology diagram depicts a parallel fan-out/fan-in, Nodes 2 and 3 execute **sequentially** — `forensics_round1` → `finops_round2` → `forensics_round3` — so Round 2 genuinely counters Round 1 and Round 3 refines on it. The parallel depiction, and the React-Flow coordinates in §5, are visual-only and remain unchanged.
 
 ---
 
@@ -141,6 +143,8 @@ Both **Track A (Tier 1)** and **Track B (Tier 2)** converge into **Node 6 (`sand
 2. It attaches `sandbox_result.verification_badge = "PASS (140ms) — 0 Syntax Errors, 0 Destructive Mutations"` to the state.
 3. **If `selected_tier == "TIER_1_AUTONOMOUS"`:** Node 6 automatically sets `hitl_decision = "AUTO_APPROVED"` and proceeds immediately to **Node 7 (`execution_node`)**.
 4. **If `selected_tier == "TIER_2_HITL"`:** Node 6 emits an SSE `PAUSED_HITL` event containing the **3:00 AM Live Engineer Briefing** + the **Sandbox PASS Badge**, and invokes LangGraph's `interrupt()` primitive, halting execution until `POST /api/v1/incidents/{id}/approve` resumes the graph.
+5. **Dry-Run Failure (deterministic fail-safe):** If the dry-run itself fails, Node 6 increments `strike_count` per failure. When `strike_count >= max_strikes`, write permissions are revoked, the incident is marked `HALTED_STRIKES`, and the graph routes to **Node 9**. Node 6 **never** re-invokes the Arbiter for an alternative command.
+6. **Checkpoint Durability:** The compiled graph uses LangGraph's `AsyncSqliteSaver` on `backend/checkpoints.db` (WAL mode), so a Tier 2 `interrupt()` pause survives uvicorn restarts/reloads. Resumption happens via `POST /api/v1/incidents/{id}/approve` (`Command(resume=...)`) against the incident's `thread_id`.
 
 ---
 
@@ -164,7 +168,7 @@ Inside **Node 8 (`gitops_pr_node`)**:
 * The sandbox container executes `pytest` in a loop up to `state["max_strikes"]` (default `3`, configurable globally in `/config`).
 * If `strike_count == max_strikes` and `pytest_passed == False`:
   * The **Circuit Breaker trips**: write/PR permissions for the ticket are revoked, incident status is marked `HALTED_STRIKES`, and the graph routes to **Node 9** and **Node 10**.
-* **Single-Ticket Override (from `/history` UI):** When an operator supplies a `prompt_hint` and clicks **"Run 4th Try on Node 8 Now"** (`POST /api/v1/incidents/{id}/retry-strike`), the backend increments `max_strikes` to `4` for that specific `incident_id` only, re-runs Node 8 with the hint, and completes Nodes 9 and 10.
+* **Single-Ticket Override (from `/history` UI):** When an operator supplies a `prompt_hint` and clicks **"Run 4th Try on Node 8 Now"** (`POST /api/v1/incidents/{id}/retry-strike`), the backend loads the ticket's latest `node_snapshots.state_json`, sets `max_strikes = 4` and the operator `prompt_hint` for that specific `incident_id` only, and re-enters the compiled graph at `node_08` using a suffixed checkpoint thread (`{incident_id}-retry-4`) so the halted original thread's history is never mutated. It then completes Nodes 9 and 10.
 
 ---
 
@@ -191,6 +195,8 @@ async def call_mcp_tool(caller_node: int, tool_name: str, args: dict) -> dict:
         )
     # Also check runtime_config.enabled_tools[tool_name] from /config matrix
 ```
+
+**Mock-Aware Tool Implementations (binding):** Nodes always traverse the real FastMCP client/server path so this firewall is exercised on every run. Under `MOCK_ENV=true` the tool implementations themselves read deterministic fixtures from `backend/app/mocks/scenarios.json`. In the current mock-only build, tools invoked with `MOCK_ENV=false` serve the same fixtures while logging a loud "live mode not provisioned" warning until real cluster adapters are introduced.
 
 ---
 
