@@ -355,3 +355,15 @@ async def next_incident_id() -> str:
         )
         mx = (await cur.fetchone())["mx"]
         return f"INC-{(mx or 4799) + 1}"
+
+
+async def wal_checkpoint() -> str:
+    """Flush the WAL to the main DB and truncate it (UNLOCK_SQLITE quick-fix).
+
+    `PRAGMA wal_checkpoint(TRUNCATE)` returns (busy, log_frames, checkpointed);
+    a busy=0 result means the checkpoint completed fully.
+    """
+    async with _connect() as db:
+        cur = await db.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        busy, log_frames, checkpointed = await cur.fetchone()
+        return f"WAL checkpointed (busy={busy}, log_frames={log_frames}, checkpointed={checkpointed})."
