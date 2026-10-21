@@ -35,4 +35,4 @@ Autonomous SRE control plane (hackathon build). Agentic incident response with g
 - Minimal changes per phase; no future-phase files beyond listed inert stubs.
 
 ## Current state
-Phase 4 committed (`ac4475b`). Next: **Phase 5** (FastAPI gateway, SSE streaming, HITL approve/resume and retry-strike endpoints) — prompt lives in `PROMPTS.md`.
+Phase 5 committed (`a788c8e`). Next: **Phase 6** (Next.js 15 dark-mode shell, global SSE context, and the 5-bento `/dashboard` War Room) — prompt lives in `PROMPTS.md`.
