@@ -28,7 +28,7 @@
 - Make **minimal** changes scoped to the current phase. Do **not** create files belonging to future phases beyond inert stubs explicitly listed below.
 - Mirror rule: any change to `backend/app/schemas/models.py` or `state.py` requires the matching change to `frontend/src/types/oaa.ts` **in the same phase**.
 - Every Python/TS identifier, endpoint path, table name, and env var must match the spec docs exactly.
-- End the phase by: running the Verification Gate → reporting results → awaiting user confirmation → committing → **stopping** until the next phase prompt is handed over.
+- End the phase by: running the Verification Gate → reporting results → awaiting user confirmation → committing → **updating `AGENTS.md` "Current state"** (phase number, commit hash, next phase) → **stopping** until the next phase prompt is handed over.
 
 ---
 ---
