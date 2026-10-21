@@ -35,4 +35,4 @@ Autonomous SRE control plane (hackathon build). Agentic incident response with g
 - Minimal changes per phase; no future-phase files beyond listed inert stubs.
 
 ## Current state
-Phase 3 committed (`d2253b5`). Next: **Phase 4** (LangGraph nodes 6–10, `interrupt()` + sqlite checkpointer, full workflow) — prompt lives in `PROMPTS.md`.
+Phase 4 committed (`ac4475b`). Next: **Phase 5** (FastAPI gateway, SSE streaming, HITL approve/resume and retry-strike endpoints) — prompt lives in `PROMPTS.md`.
