@@ -6,26 +6,44 @@ debate (Locked Decision 2):
     N1 (ingest) → N2 R1 (forensics) → N3 R2 (finops) → N2 R3 (forensics)
                 → N4 (arbiter) → N5 (blast-radius gate) → END
 
+Phase 4 adds the *full* 10-node graph (Nodes 6–10, Tier 2 `interrupt()`, the
+`check_if_pr_needed` router, the GitOps 3-strike loop, reporting, and ledger),
+compiled with an `AsyncSqliteSaver` on `backend/checkpoints.db` (WAL).
+
 Every node is wrapped in an instrumentation wrapper that:
   * records start/end and elapsed_ms,
   * inserts a `node_snapshots` row (node_id, name, status, elapsed_ms, full state_json),
   * invokes an injected optional async `event_sink(event_dict)` callback
     (default no-op — Phase 5 injects the SSE broadcaster).
 
-The full 10-node builder (`build_graph`) is reserved for Phase 4.
+The wrapper lets `GraphInterrupt` (from `interrupt()`) bubble up untouched so a
+Tier 2 pause is not mis-recorded as a HALTED snapshot.
 """
 
+import json
+import os
 import time
+from functools import partial
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+import aiosqlite
+from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.core import database
+from app.core.config import get_settings
 from app.graph.nodes.node_01_ingest import ingest_node
 from app.graph.nodes.node_02_forensics import forensics_round1, forensics_round3
 from app.graph.nodes.node_03_finops import finops_round2
 from app.graph.nodes.node_04_arbiter import arbiter_node
 from app.graph.nodes.node_05_blast_radius import blast_radius_gate
+from app.graph.nodes.node_06_sandbox import sandbox_node
+from app.graph.nodes.node_07_execution import execution_node
+from app.graph.nodes.node_08_gitops_pr import gitops_pr_node
+from app.graph.nodes.node_09_reporting import shared_reporting_node
+from app.graph.nodes.node_10_ledger import flight_ledger_node
 from app.mocks import get_scenario
 from app.schemas.state import OAAState
 
@@ -36,7 +54,9 @@ EventSink = Callable[[Dict[str, Any]], Awaitable[None]]
 # full `state_json` snapshot.
 _REDUCER_KEYS = {"debate_transcript"}
 
-# (graph key, node_id, node_name, node fn) — in execution order.
+_REPO_ROOT = Path(__file__).resolve().parents[3]  # .../OAA (repo root)
+
+# (graph key, node_id, node_name, node fn) — in execution order (partial graph).
 _PARTIAL_NODES: List[Tuple[str, int, str, Callable]] = [
     ("node_01_ingest", 1, "ingest_node", ingest_node),
     ("node_02_forensics_r1", 2, "forensics_node", forensics_round1),
@@ -44,6 +64,14 @@ _PARTIAL_NODES: List[Tuple[str, int, str, Callable]] = [
     ("node_02_forensics_r3", 2, "forensics_node", forensics_round3),
     ("node_04_arbiter", 4, "arbiter_node", arbiter_node),
     ("node_05_blast_radius", 5, "blast_radius_gate", blast_radius_gate),
+]
+
+# The tail (Nodes 8–10) is shared between the full graph and the retry-entry
+# graph used by `resume_from_snapshot` (ARCHITECTURE §3.4).
+_TAIL_NODES: List[Tuple[str, int, str, Callable]] = [
+    ("node_08_gitops_pr", 8, "gitops_pr_node", gitops_pr_node),
+    ("node_09_reporting", 9, "shared_reporting_node", shared_reporting_node),
+    ("node_10_ledger", 10, "flight_ledger_node", flight_ledger_node),
 ]
 
 
@@ -118,6 +146,10 @@ def _instrument(
 
         try:
             update = await fn(state)
+        except GraphInterrupt:
+            # `interrupt()` pause — not an error; bubble up untouched so the
+            # graph framework records the interrupt (no HALTED snapshot).
+            raise
         except Exception:
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             await database.insert_node_snapshot(
@@ -174,9 +206,177 @@ def build_partial_graph(event_sink: Optional[EventSink] = None):
     return graph.compile()
 
 
-def build_graph(event_sink: Optional[EventSink] = None):
-    """Full 10-node builder — implemented in Phase 4 (PROMPTS.md)."""
-    raise NotImplementedError(
-        "The full 10-node workflow (Nodes 6–10, interrupt(), checkpointer) "
-        "lands in Phase 4. Use build_partial_graph() for the Nodes 1–5 gate."
+# --------------------------------------------------------------------------- #
+# Conditional routers                                                          #
+# --------------------------------------------------------------------------- #
+
+def route_after_sandbox(state: OAAState) -> str:
+    """Node 6 decision edge: APPROVED/AUTO_APPROVED → Node 7; else → Node 9."""
+    if state.get("hitl_decision") in ("APPROVED", "AUTO_APPROVED"):
+        return "node_07_execution"
+    return "node_09_reporting"
+
+
+def check_if_pr_needed(state: OAAState) -> str:
+    """Post-stabilization router — verbatim from ARCHITECTURE §3.3."""
+    if state.get("execution_status") != "STABILIZED":
+        return "node_09_reporting"
+    if state["arbiter_decision"].get("is_code_bug") is True:
+        return "node_08_gitops_pr"
+    return "node_09_reporting"
+
+
+def _add_node(
+    graph: StateGraph,
+    key: str,
+    node_id: int,
+    node_name: str,
+    fn: Callable,
+    sink: EventSink,
+) -> None:
+    graph.add_node(key, _instrument(node_id, node_name, fn, sink))
+
+
+def _build_full_graph_builder(sink: EventSink) -> StateGraph:
+    """Assemble the full 10-node StateGraph (nodes + edges, uncompiled)."""
+    graph = StateGraph(OAAState)
+
+    # Nodes 1–5 (sequential debate, Locked Decision 2).
+    for key, node_id, node_name, fn in _PARTIAL_NODES:
+        _add_node(graph, key, node_id, node_name, fn, sink)
+
+    # Node 6 additionally receives the event sink so it can emit the Tier 2
+    # `PAUSED_HITL` event before calling `interrupt()`.
+    _add_node(graph, "node_06_sandbox", 6, "sandbox_node", partial(sandbox_node, event_sink=sink), sink)
+    _add_node(graph, "node_07_execution", 7, "execution_node", execution_node, sink)
+
+    # Nodes 8–10 (shared tail).
+    for key, node_id, node_name, fn in _TAIL_NODES:
+        _add_node(graph, key, node_id, node_name, fn, sink)
+
+    # Linear edges (N5 tier split is recorded in `selected_tier`; both tracks
+    # converge at Node 6 — visual-only, mirroring Locked Decision 2).
+    graph.add_edge(START, "node_01_ingest")
+    for prev, nxt in (
+        ("node_01_ingest", "node_02_forensics_r1"),
+        ("node_02_forensics_r1", "node_03_finops_r2"),
+        ("node_03_finops_r2", "node_02_forensics_r3"),
+        ("node_02_forensics_r3", "node_04_arbiter"),
+        ("node_04_arbiter", "node_05_blast_radius"),
+        ("node_05_blast_radius", "node_06_sandbox"),
+        ("node_08_gitops_pr", "node_09_reporting"),
+        ("node_09_reporting", "node_10_ledger"),
+    ):
+        graph.add_edge(prev, nxt)
+
+    # Conditional edges.
+    graph.add_conditional_edges(
+        "node_06_sandbox",
+        route_after_sandbox,
+        {
+            "node_07_execution": "node_07_execution",
+            "node_09_reporting": "node_09_reporting",
+        },
     )
+    graph.add_conditional_edges(
+        "node_07_execution",
+        check_if_pr_needed,
+        {
+            "node_08_gitops_pr": "node_08_gitops_pr",
+            "node_09_reporting": "node_09_reporting",
+        },
+    )
+
+    graph.add_edge("node_10_ledger", END)
+    return graph
+
+
+def _build_retry_graph_builder(sink: EventSink) -> StateGraph:
+    """Assemble the retry-entry graph: START → Node 8 → Node 9 → Node 10 → END.
+
+    `resume_from_snapshot` re-enters the workflow at Node 8 with the rehydrated
+    state on a fresh suffixed thread, so the halted original thread's checkpoint
+    history is never mutated (ARCHITECTURE §3.4). The node functions (and their
+    instrumentation) are identical to the full graph.
+    """
+    graph = StateGraph(OAAState)
+    for key, node_id, node_name, fn in _TAIL_NODES:
+        _add_node(graph, key, node_id, node_name, fn, sink)
+
+    graph.add_edge(START, "node_08_gitops_pr")
+    graph.add_edge("node_08_gitops_pr", "node_09_reporting")
+    graph.add_edge("node_09_reporting", "node_10_ledger")
+    graph.add_edge("node_10_ledger", END)
+    return graph
+
+
+def _checkpoint_db_path() -> str:
+    """OAA_CHECKPOINT_DB_PATH (tests, absolute) wins; otherwise
+    CHECKPOINT_DB_PATH is resolved relative to the repo root (Locked Decision 3)."""
+    raw = os.environ.get("OAA_CHECKPOINT_DB_PATH") or get_settings().checkpoint_db_path
+    path = Path(raw)
+    if not path.is_absolute():
+        path = _REPO_ROOT / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+async def _open_checkpointer() -> AsyncSqliteSaver:
+    """Open an AsyncSqliteSaver on backend/checkpoints.db (WAL) + run its setup."""
+    conn = await aiosqlite.connect(_checkpoint_db_path())
+    checkpointer = AsyncSqliteSaver(conn)
+    await checkpointer.setup()
+    return checkpointer
+
+
+async def build_graph(
+    event_sink: Optional[EventSink] = None,
+    checkpointer: Optional[AsyncSqliteSaver] = None,
+):
+    """Compile the full 10-node graph with `interrupt()` enabled.
+
+    When `checkpointer` is omitted, an `AsyncSqliteSaver` is opened on
+    `backend/checkpoints.db` (WAL). The returned graph owns that connection; keep
+    the graph referenced for the lifetime of the run (Phase 5 keeps it for the
+    server lifespan). Passing a `checkpointer` lets tests (and the restart-survival
+    check) bind an explicit saver.
+    """
+    sink: EventSink = event_sink or _noop_event_sink
+
+    if checkpointer is None:
+        checkpointer = await _open_checkpointer()
+
+    return _build_full_graph_builder(sink).compile(checkpointer=checkpointer)
+
+
+# --------------------------------------------------------------------------- #
+# Retry-strike re-entry (ARCHITECTURE §3.4)                                    #
+# --------------------------------------------------------------------------- #
+
+async def resume_from_snapshot(
+    incident_id: str,
+    prompt_hint: str,
+    event_sink: Optional[EventSink] = None,
+):
+    """Loads the halted ticket's latest `node_snapshots.state_json`, applies a
+    per-ticket `max_strikes=4` + operator `prompt_hint`, and re-enters the
+    workflow at Node 8 on a fresh suffixed thread (`{incident_id}-retry-4`) so
+    the halted original thread's checkpoint history is never mutated. The run
+    then completes Nodes 9 → 10."""
+    snapshot = await database.get_latest_snapshot(incident_id)
+    if snapshot is None:
+        raise ValueError(f"No snapshots found for incident '{incident_id}' — cannot resume.")
+
+    state = json.loads(snapshot["state_json"])
+    state["max_strikes"] = 4
+    state["prompt_hint"] = prompt_hint
+
+    sink: EventSink = event_sink or _noop_event_sink
+    checkpointer = await _open_checkpointer()
+    try:
+        graph = _build_retry_graph_builder(sink).compile(checkpointer=checkpointer)
+        thread_id = f"{incident_id}-retry-4"
+        config = {"configurable": {"thread_id": thread_id}}
+        return await graph.ainvoke(state, config)
+    finally:
+        await checkpointer.conn.close()
