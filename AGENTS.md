@@ -35,4 +35,10 @@ Autonomous SRE control plane (hackathon build). Agentic incident response with g
 - Minimal changes per phase; no future-phase files beyond listed inert stubs.
 
 ## Current state
-Phase 5 committed (`a788c8e`). Next: **Phase 6** (Next.js 15 dark-mode shell, global SSE context, and the 5-bento `/dashboard` War Room) — prompt lives in `PROMPTS.md`.
+Phase 6 committed (`06346d5`). Next: **Phase 7** (Page 2 `/history` — Blackbox ticket drawer, `@xyflow/react` n8n-style 10-node DAG replay with Play/Pause/Step, node inspector JSON, and the 4th-strike override console) — prompt lives in `PROMPTS.md`.
+
+Phase 6 notes for future sessions:
+- Frontend shell is live: `next.config.ts` holds the `/api/*` → `:8000` `rewrites()` proxy plus `compress: false`.
+  **Do not re-enable compression** — Next's gzip middleware buffers `text/event-stream` frames into one burst at the end of the response, which silently kills live SSE rendering on `/dashboard` and `/history`. Verified by frame-arrival timing through the proxy vs. the backend direct.
+- `src/context/OAAContext.tsx` owns the live surface: `useIncidentSSE` (native `EventSource` on the relative `/api/v1/incidents/{id}/stream`, backoff reconnect, close on terminal), the merged `OAAStateSnapshot` (concatenates `debate_transcript` deltas), the SLA stopwatch, and the incident/config caches. Phase 7 should subscribe through this context rather than opening its own stream.
+- Node 6 re-executes its body on `interrupt()` resume, so it publishes a second `PAUSED` event after approval — the context's `hitlResolved` flag exists to stop the status pill from re-arming the amber gate. Reuse that pattern for the Phase 7 replay.
