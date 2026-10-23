@@ -147,3 +147,75 @@ export type QuickFixAction =
   | "PURGE_SANDBOX"
   | "UNLOCK_SQLITE"
   | "ENABLE_MOCK_ENV";
+
+// --- Frontend-only view types ------------------------------------------------
+// These describe API response envelopes and fixture payloads that have no
+// dedicated Pydantic model in `backend/app/schemas/models.py`. They live here
+// so the dashboard views stay fully typed without diluting the 1:1 model
+// mirror above.
+
+export interface SSETerminalEvent {
+  event: "terminal";
+  incident_id: string;
+  status: string;
+  error?: string;
+}
+
+export type SSEEvent = SSENodeEvent | SSETerminalEvent;
+
+export interface LastHealthySummary {
+  incident_id: string;
+  service: string;
+  alert_name: string;
+  selected_tier: SelectedTier | null;
+  blast_radius_score: number | null;
+  resolved_at: string;
+  snapshot_count: number;
+  final_report_md: string | null;
+}
+
+export interface IncidentListResponse {
+  incidents: IncidentRow[];
+  last_healthy_summary: LastHealthySummary | null;
+}
+
+export interface ApproveResponse {
+  incident_id: string;
+  status: "RESUMED";
+}
+
+export interface DbPoolMetric {
+  used: number;
+  max: number;
+}
+
+export interface TelemetryMetrics {
+  cpu_pct: number;
+  ram_pct: number;
+  ram_trend?: string;
+  db_pool: DbPoolMetric;
+  http_5xx_rate?: number;
+  http_504_count_5m?: number;
+  lock_waits?: number;
+  blocking_pid?: number;
+  restart_count?: number;
+}
+
+export interface TelemetryPayload {
+  metrics: TelemetryMetrics;
+  logs: string[];
+  topology: Record<string, unknown>;
+}
+
+/** Global status pill states (CONTEXT.md §4.1 — Top Bar). */
+export type GlobalStatus = "HEALTHY" | "INCIDENT_ACTIVE" | "TIER_2_PAUSED";
+
+/**
+ * Merged live state assembled from the incremental `node_update` SSE frames.
+ * `live_engineer_briefing` / `verification_badge` are the extra keys published
+ * by the Tier 2 `PAUSED` event emitted from Node 6.
+ */
+export interface OAAStateSnapshot extends Partial<OAAState> {
+  live_engineer_briefing?: string;
+  verification_badge?: string;
+}
