@@ -206,7 +206,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     incident_id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
     alert_name TEXT NOT NULL,
-    status TEXT NOT NULL, -- 'RUNNING', 'PAUSED_HITL', 'RESOLVED', 'HALTED_STRIKES'
+    status TEXT NOT NULL, -- 'RUNNING', 'PAUSED_HITL', 'RESOLVED', 'HALTED_STRIKES', 'HALTED_EXECUTION'
     selected_tier TEXT,
     blast_radius_score REAL,
     is_code_bug INTEGER DEFAULT 0,
@@ -330,6 +330,7 @@ class OAAState(TypedDict):
 | :--- | :--- | :--- | :--- | :--- |
 | `POST` | `/api/v1/incidents/ingest` | Starts async 10-node run from webhook or chaos button | `{"scenario_key": "SCENARIO_1_STATELESS" \| "SCENARIO_2_STATEFUL_DB" \| "SCENARIO_3_CODE_BUG"}` | `{"incident_id": "INC-4819", "status": "STARTED", "stream_url": "/api/v1/incidents/INC-4819/stream"}` |
 | `GET` | `/api/v1/incidents/{id}/stream` | Real-time SSE stream for `/dashboard` and `/history` | None (Query param `?id=INC-4819`) | SSE `data: {"event": "node_update", "node_id": 1..10, "status": "RUNNING"\|"COMPLETED"\|"PAUSED"\|"HALTED", "state": {...}}` |
+| `GET` | `/api/v1/incidents/{id}/snapshots` | Ordered `node_snapshots` chronology for the `/history` replay engine and node inspector (`id ASC`; node ids may repeat) | None | `{"incident_id": "INC-4815", "snapshots": [{"id": 1, "incident_id": "INC-4815", "node_id": 1, "node_name": "ingest_node", "status": "COMPLETED", "elapsed_ms": 392, "state_json": "{...}", "timestamp": "..."}, ...]}` |
 | `POST` | `/api/v1/incidents/{id}/approve` | Resumes Tier 2 `interrupt()` pause after Node 6 | `{"decision": "APPROVED" \| "REJECTED"}` | `{"incident_id": "INC-4819", "status": "RESUMED"}` |
 | `POST` | `/api/v1/incidents/{id}/retry-strike` | Grants temporary 4th strike on Node 8 in `/history` | `{"prompt_hint": "Use dict.get('tax', 0.0)"}` | `{"incident_id": "INC-4815", "max_strikes": 4, "status": "RETRIED_RESOLVED"}` |
 | `GET` | `/api/v1/incidents` | Lists all Blackbox tickets & snapshots for `/history` | Optional `?tier=TIER_2` | `{"incidents": [...], "last_healthy_summary": {...}}` |

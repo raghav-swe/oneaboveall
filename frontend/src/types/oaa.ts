@@ -109,7 +109,12 @@ export interface SSENodeEvent {
   state: Partial<OAAState>;
 }
 
-export type IncidentStatus = "RUNNING" | "PAUSED_HITL" | "RESOLVED" | "HALTED_STRIKES";
+export type IncidentStatus =
+  | "RUNNING"
+  | "PAUSED_HITL"
+  | "RESOLVED"
+  | "HALTED_STRIKES"
+  | "HALTED_EXECUTION";
 
 export interface IncidentRow {
   incident_id: string;

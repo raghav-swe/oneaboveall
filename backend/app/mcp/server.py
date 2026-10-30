@@ -12,6 +12,7 @@ This module must never import from app.mcp.client (firewall lives there).
 import contextvars
 import json
 import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,12 @@ from app.core.config import get_settings
 logger = logging.getLogger("oaa.mcp")
 
 SCENARIO_KEYS = ("SCENARIO_1_STATELESS", "SCENARIO_2_STATEFUL_DB", "SCENARIO_3_CODE_BUG")
+
+# Deterministic failure injection for the "stabilization failed" path. The mock
+# mutating tools can otherwise only ever return STABILIZED, which would leave
+# Node 7's FAILED branch and the HALTED_EXECUTION status untestable.
+# Mirrors sandbox/runner.py's OAA_FORCE_HALTED_PYTEST hook for Node 8.
+_FORCE_EXECUTION_FAILED = "OAA_FORCE_EXECUTION_FAILED"
 
 _SCENARIOS_PATH = Path(__file__).resolve().parent.parent / "mocks" / "scenarios.json"
 
@@ -144,16 +151,35 @@ async def flush_redis_cache(pattern: str = "*") -> Dict[str, Any]:
 
 def _mutating_result(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     """Return the scenario's scripted execution result when it matches this tool;
-    otherwise synthesize a deterministic generic success."""
+    otherwise synthesize a deterministic generic success.
+
+    `OAA_FORCE_EXECUTION_FAILED=1` overrides the outcome to `FAILED` so the
+    live-execution failure path (Node 7 → Node 9 → HALTED_EXECUTION) is
+    deterministically reproducible in the mock build.
+    """
     scenario = _scenario()
     scripted = scenario.get("execution_result")
     if scripted and scripted.get("tool") == tool_name:
-        return {**scripted, "args": args, "mock": True}
-    return {
-        "tool": tool_name,
-        "status": "STABILIZED",
-        "duration_ms": 1500,
-        "stdout": f"[mock] {tool_name} executed with args {json.dumps(args, sort_keys=True)} — no scenario-specific script",
-        "args": args,
-        "mock": True,
-    }
+        result = {**scripted, "args": args, "mock": True}
+    else:
+        result = {
+            "tool": tool_name,
+            "status": "STABILIZED",
+            "duration_ms": 1500,
+            "stdout": f"[mock] {tool_name} executed with args {json.dumps(args, sort_keys=True)} — no scenario-specific script",
+            "args": args,
+            "mock": True,
+        }
+
+    if os.environ.get(_FORCE_EXECUTION_FAILED):
+        result = {
+            **result,
+            "status": "FAILED",
+            "stdout": (
+                "[forced] runtime mutation did not stabilize the service — the "
+                "pre-flight dry-run passed, but the live API call was rejected "
+                "(injected via OAA_FORCE_EXECUTION_FAILED)"
+            ),
+        }
+
+    return result

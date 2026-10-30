@@ -2,6 +2,9 @@
 
 Tier-aware final markdown, generated deterministically from state (mock mode):
 
+- Execution FAILED → Stabilization Failed Report (checked first — nothing
+  downstream of a failed live execution is true, so it outranks every other
+  template)
 - Tier 1 → Morning Digest Report
 - Tier 2 → HITL Post-Action Audit Report (human decision + timestamps)
 - Tier 3 → GitOps Incident Closure Dossier (links Node 7 stabilization +
@@ -109,11 +112,52 @@ def _circuit_breaker_halt(state: OAAState) -> str:
     )
 
 
+def _stabilization_failed(state: OAAState) -> str:
+    """Report for a live execution that was authorized but did NOT stabilize.
+
+    The pre-flight dry-run is a *static* proof (syntax + destructive-mutation
+    check); it cannot model runtime conditions. This template is the honest
+    record of that gap.
+    """
+    incident_id = state.get("incident_id")
+    service = state.get("service")
+    decision = state.get("arbiter_decision") or {}
+    tier = state.get("selected_tier") or "UNKNOWN"
+    authorization = state.get("hitl_decision") or "UNKNOWN"
+    badge = (state.get("sandbox_result") or {}).get("verification_badge", "")
+    return (
+        f"## ⚠️ Stabilization Failed — {incident_id} ({service})\n\n"
+        f"**Tier:** {tier}\n"
+        f"**Authorization:** {authorization}\n"
+        f"**Pre-flight badge:** {badge}\n\n"
+        f"### What was attempted\n"
+        f"`{decision.get('command_to_run', '')}` "
+        f"({decision.get('mcp_tool_name', '')})\n\n"
+        f"### Why it failed\n"
+        f"The pre-flight sandbox dry-run PASSed (0 syntax errors, 0 destructive "
+        f"mutations), but the live execution did not stabilize the service. A static "
+        f"dry-run cannot model runtime conditions: RBAC/IAM denial, capacity or "
+        f"PodDisruptionBudget limits, admission webhooks, stale pod targets, or the "
+        f"root cause re-occurring after the mutation.\n\n"
+        f"### What did NOT happen\n"
+        f"- No code patch or pull request was attempted — live stabilization must "
+        f"succeed first.\n"
+        f"- No strikes were consumed — the circuit breaker governs the sandbox/pytest "
+        f"loops only.\n\n"
+        f"### Next action\n"
+        f"Escalate to a human engineer. OAA did **not** resolve this incident.\n"
+    )
+
+
 def _build_report(state: OAAState) -> str:
     decision = state.get("arbiter_decision") or {}
     is_code_bug = bool(decision.get("is_code_bug"))
     patch = state.get("patch_bundle")
 
+    # A failed live execution outranks every other template: the service was
+    # never stabilized, so no success claim downstream of it would be true.
+    if state.get("execution_status") == "FAILED":
+        return _stabilization_failed(state)
     if is_halted(state):
         return _circuit_breaker_halt(state)
     if is_code_bug and patch and patch.get("pytest_passed"):

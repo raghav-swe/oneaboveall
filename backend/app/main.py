@@ -7,6 +7,7 @@ Lifespan: `init_db()` (WAL + seeds), hydrate the runtime-config cache, open an
 Endpoints (verbatim from CONTEXT.md §6):
   * POST /api/v1/incidents/ingest          — start an async run, return stream_url.
   * GET  /api/v1/incidents/{id}/stream     — live SSE (no-cache, no-buffer).
+  * GET  /api/v1/incidents/{id}/snapshots  — ordered node_snapshots for replay.
   * POST /api/v1/incidents/{id}/approve    — resume a Tier 2 interrupt.
   * POST /api/v1/incidents/{id}/retry-strike — 4th-strike override (Node 8 re-entry).
   * GET  /api/v1/incidents                 — ticket list + last healthy summary.
@@ -40,7 +41,7 @@ from app.schemas.models import RuntimeConfigModel
 
 logger = logging.getLogger("oaa.main")
 
-TERMINAL_STATUSES = {"RESOLVED", "HALTED_STRIKES", "HALTED"}
+TERMINAL_STATUSES = {"RESOLVED", "HALTED_STRIKES", "HALTED", "HALTED_EXECUTION"}
 
 
 # --------------------------------------------------------------------------- #
@@ -193,6 +194,21 @@ async def stream(incident_id: str, request: Request):
             "Connection": "keep-alive",
         },
     )
+
+
+@app.get("/api/v1/incidents/{incident_id}/snapshots")
+async def list_snapshots(incident_id: str):
+    """Ordered `node_snapshots` chronology for one ticket.
+
+    Source of truth for the `/history` replay engine and the node inspector
+    (CONTEXT §6). Rows are returned in insertion order (`id ASC`), which is the
+    execution chronology — note that node ids legitimately repeat (the two
+    debate rounds re-use node 2, and Node 8 records one row per strike).
+    """
+    if await database.get_incident(incident_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown incident '{incident_id}'.")
+    snapshots = await database.get_snapshots(incident_id)
+    return {"incident_id": incident_id, "snapshots": snapshots}
 
 
 @app.post("/api/v1/incidents/{incident_id}/approve")

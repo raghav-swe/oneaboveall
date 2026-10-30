@@ -30,12 +30,12 @@ Autonomous SRE control plane (hackathon build). Agentic incident response with g
 - `MOCK_ENV=true` for the whole build; LLM clients wired but dormant.
 - Ports: backend `:8000`, frontend `:3000`.
 - **Never run git mutations without explicit per-action user confirmation.**
-- **After every phase commit, update the "Current state" section below** (phase number, commit hash, next phase). This file is the cross-session anchor — a stale state line defeats its purpose.
+- **Fold the "Current state" update below into the phase commit itself** — one commit per phase, and **never a separate commit for an `AGENTS.md` edit**. Identify the phase by its **commit subject, not a hash**, because the hash only exists after the commit is created (a hash written into the commit would be self-referentially wrong). This file is the cross-session anchor — a stale state line defeats its purpose.
 - Identifiers, endpoint paths, table names, env vars must match the spec docs exactly.
 - Minimal changes per phase; no future-phase files beyond listed inert stubs.
 
 ## Current state
-Phase 6 committed (`06346d5`). Next: **Phase 7** (Page 2 `/history` — Blackbox ticket drawer, `@xyflow/react` n8n-style 10-node DAG replay with Play/Pause/Step, node inspector JSON, and the 4th-strike override console) — prompt lives in `PROMPTS.md`.
+Phase 6 committed (`Phase 6: Next.js dark shell, SSE context, dashboard 5-bento war room`). Next: **Phase 7** (Page 2 `/history` — Blackbox ticket drawer, `@xyflow/react` n8n-style 10-node DAG replay with Play/Pause/Step, node inspector JSON, and the 4th-strike override console) — prompt lives in `PROMPTS.md`.
 
 Phase 6 notes for future sessions:
 - Frontend shell is live: `next.config.ts` holds the `/api/*` → `:8000` `rewrites()` proxy plus `compress: false`.

@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS incidents (
     incident_id TEXT PRIMARY KEY,
     service TEXT NOT NULL,
     alert_name TEXT NOT NULL,
-    status TEXT NOT NULL, -- 'RUNNING', 'PAUSED_HITL', 'RESOLVED', 'HALTED_STRIKES'
+    status TEXT NOT NULL, -- 'RUNNING', 'PAUSED_HITL', 'RESOLVED', 'HALTED_STRIKES', 'HALTED_EXECUTION'
     selected_tier TEXT,
     blast_radius_score REAL,
     is_code_bug INTEGER DEFAULT 0,
