@@ -1,24 +1,16 @@
-import { SlidersHorizontal } from "lucide-react";
-
-/**
- * Page 3 placeholder — the governance console (blast-threshold slider, hard
- * invariant locks, circuit-breaker policy and the FastMCP tool permission
- * matrix) ships in Phase 8.
- */
-export default function ConfigPage() {
-  return (
-    <div className="flex min-h-[60vh] items-center justify-center p-8">
-      <div className="w-full max-w-lg rounded-lg border border-oaa-border bg-oaa-panel p-8 text-center">
-        <SlidersHorizontal className="mx-auto h-8 w-8 text-slate-600" />
-        <h1 className="mt-4 text-lg font-semibold text-slate-200">
-          Control Plane Governance
-        </h1>
-        <p className="mt-2 text-sm text-slate-500">
-          The autonomous-authority slider, hard invariant locks and the FastMCP
-          permission matrix are being built in{" "}
-          <span className="font-mono text-oaa-accent">Phase 8</span>.
-        </p>
-      </div>
-    </div>
-  );
+"use client";
+import { useState } from "react";
+import { defaultConfig } from "@/lib/mockData";
+import AppearanceControl from "@/components/layout/AppearanceControl";
+export default function Page() {
+  const [config, setConfig] = useState(defaultConfig); const [saved,setSaved]=useState(false);
+  const update = (key: keyof typeof config, value: number|string|boolean) => setConfig({...config,[key]:value});
+  return <div className="mx-auto max-w-4xl space-y-5"><header><div className="eyebrow">control center · policy & routing</div><h1 className="mt-2 font-display text-4xl font-semibold tracking-[-.05em]">Configuration</h1><p className="mt-2 text-sm text-[var(--muted)]">Set the guardrails that keep autonomous operations safe.</p></header>
+    <div className="panel flex items-center justify-between p-4"><div><b className="text-sm">Production policy</b><p className="mt-1 text-xs text-[var(--muted)]">Changes apply to new incidents only.</p></div><span className="tag tag-good">● healthy</span></div>
+    <section className="panel panel-pad"><div className="eyebrow">01 · safety policy</div><h2 className="mt-2 section-title">Strikes & blast radius</h2><p className="section-sub">When should agents pause and ask for a human?</p><div className="mt-6 grid gap-6 sm:grid-cols-2"><label className="text-xs">Blast radius threshold <div className="mt-3 flex items-center gap-3"><input type="range" min=".15" max=".75" step=".05" value={config.blastThreshold} onChange={e=>update("blastThreshold",Number(e.target.value))} className="w-full accent-[var(--accent)]"/><b className="data w-12">{Math.round(config.blastThreshold*100)}%</b></div></label><label className="text-xs">Maximum failed strikes<select value={config.maxStrikes} onChange={e=>update("maxStrikes",Number(e.target.value))} className="btn mt-3 block w-full"><option value="2">2 strikes</option><option value="3">3 strikes</option><option value="4">4 strikes</option><option value="5">5 strikes</option></select></label></div></section>
+    <section className="panel panel-pad"><div className="eyebrow">02 · model routing</div><h2 className="mt-2 section-title">Assign the right specialist</h2><div className="mt-5 grid gap-3 sm:grid-cols-3">{(["forensics","finops","arbiter"] as const).map(role=><label key={role} className="text-xs capitalize">{role}<select value={config.routing[role]} onChange={e=>setConfig({...config,routing:{...config.routing,[role]:e.target.value}})} className="btn mt-2 block w-full text-left"><option value="llama-3.3-70b">Llama 3.3 70B</option><option value="gpt-oss-120b">GPT OSS 120B</option><option value="gemini-2.5-flash">Gemini 2.5 Flash</option></select></label>)}</div></section>
+    <section className="panel panel-pad"><div className="eyebrow">03 · environment safety</div><h2 className="mt-2 section-title">Guarded execution</h2><div className="mt-5 flex items-center justify-between border-b border-[var(--line)] pb-4"><div><b className="text-xs">Mock environment</b><p className="mt-1 text-xs text-[var(--muted)]">Route mutations to a sandbox, never production.</p></div><button aria-pressed={config.mockEnv} onClick={()=>update("mockEnv",!config.mockEnv)} className={`h-6 w-11 rounded-full p-1 transition ${config.mockEnv?"bg-[var(--accent)]":"bg-[var(--surface-2)] border border-[var(--line)]"}`}><i className={`block h-4 w-4 rounded-full bg-white transition ${config.mockEnv?"translate-x-5":""}`}/></button></div><div className="mt-4 flex items-center gap-2 text-xs text-[var(--good)]">✓ Sandbox dry-run required before every stateful action</div></section>
+    <section className="panel panel-pad"><div className="eyebrow">04 · workspace appearance</div><h2 className="mt-2 section-title">Appearance</h2><p className="section-sub">Customize how the operations workspace looks. Your selection is saved for this browser and applies across every route.</p><div className="mt-5 max-w-md"><AppearanceControl /></div></section>
+    <footer className="flex items-center justify-end gap-3"><span className="mr-auto text-xs text-[var(--good)]">{saved?"Changes saved just now":""}</span><button className="btn" onClick={()=>setConfig(defaultConfig)}>Reset defaults</button><button className="btn btn-primary" onClick={()=>setSaved(true)}>Save changes</button></footer>
+  </div>;
 }

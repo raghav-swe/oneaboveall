@@ -1,23 +1,4 @@
-import { LifeBuoy } from "lucide-react";
-
-/**
- * Page 4 placeholder — the one-click self-healing cards, operational FAQ
- * accordion and the platform escalation card ship in Phase 8.
- */
-export default function SupportPage() {
-  return (
-    <div className="flex min-h-[60vh] items-center justify-center p-8">
-      <div className="w-full max-w-lg rounded-lg border border-oaa-border bg-oaa-panel p-8 text-center">
-        <LifeBuoy className="mx-auto h-8 w-8 text-slate-600" />
-        <h1 className="mt-4 text-lg font-semibold text-slate-200">
-          Self-Healing &amp; Support
-        </h1>
-        <p className="mt-2 text-sm text-slate-500">
-          The four one-click quick fixes, the operational FAQ accordion and the
-          diagnostic bundle mailer are being built in{" "}
-          <span className="font-mono text-oaa-accent">Phase 8</span>.
-        </p>
-      </div>
-    </div>
-  );
-}
+"use client";
+import { useState } from "react";
+const fixes=[["Clear a stuck Postgres lock","Release a waiting process safely","Database"],["Review a halted GitOps PR","Inspect strike history and resume","Deployments"],["Export an incident report","Share a signed flight timeline","Reports"]];
+export default function Page(){const [query,setQuery]=useState("");const [done,setDone]=useState<string[]>([]);const visible=fixes.filter(x=>x.join(" ").toLowerCase().includes(query.toLowerCase()));return <div className="mx-auto max-w-5xl space-y-5"><header><div className="eyebrow">support desk · runbooks & diagnostics</div><h1 className="mt-2 font-display text-4xl font-semibold tracking-[-.05em]">How can we help?</h1><p className="mt-2 text-sm text-[var(--muted)]">Find a quick fix or connect with the operations team.</p></header><div className="panel flex items-center gap-3 p-3"><span className="text-xl">⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search runbooks, incidents, or diagnostics..." className="w-full bg-transparent text-sm outline-none placeholder:text-[var(--faint)]"/></div><div className="grid gap-4 lg:grid-cols-3"><section className="panel panel-pad lg:col-span-2"><div className="flex justify-between"><div><h2 className="section-title">Quick fixes</h2><p className="section-sub">Common tasks with verified runbooks</p></div><span className="tag tag-good">12 available</span></div><div className="mt-5 grid gap-3 sm:grid-cols-2">{visible.map(([title,desc,cat])=><button key={title} onClick={()=>setDone([...done,title])} className="rounded-lg border border-[var(--line)] p-4 text-left transition hover:border-[var(--accent)]"><div className="flex justify-between"><span className="tag">{cat}</span><span className="text-[var(--accent)]">{done.includes(title)?"✓":"→"}</span></div><b className="mt-4 block text-sm">{title}</b><p className="mt-1 text-xs text-[var(--muted)]">{desc}</p></button>)}</div></section><aside className="panel panel-pad"><h2 className="section-title">Diagnostic checklist</h2><p className="section-sub">Before escalating an incident</p><div className="mt-5 space-y-4">{["Check current blast radius","Review latest agent verdict","Confirm sandbox result","Attach relevant event log"].map((item,i)=><div key={item} className="flex gap-3 text-xs"><span className="grid h-5 w-5 shrink-0 place-items-center rounded border border-[var(--line)] text-[var(--muted)]">{i+1}</span><span>{item}</span></div>)}</div><button className="btn btn-primary mt-7 w-full">Run full diagnostics</button></aside></div><section className="panel flex flex-wrap items-center justify-between gap-4 p-5"><div><div className="eyebrow">Need a human?</div><h2 className="mt-2 section-title">Talk to the on-call team</h2><p className="section-sub">Average response time is under 8 minutes.</p></div><button className="btn">Escalate to SRE →</button></section><div className="data text-[var(--muted)]">Recent activity · INC-4819 reviewed 4m ago · INC-4818 report exported yesterday</div></div>}
