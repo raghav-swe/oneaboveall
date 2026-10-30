@@ -1,31 +1,32 @@
 import type { Config } from "tailwindcss";
 
-/**
- * OAA dark-mode SRE theme — Tailwind v3.4 config-file style (locked decision:
- * do NOT migrate to v4 CSS-first).
- */
 const config: Config = {
   content: ["./src/**/*.{ts,tsx}"],
-  darkMode: "class",
   theme: {
     extend: {
       colors: {
         oaa: {
-          bg: "#070b14", // app background
-          panel: "#090d16", // bento / panel background
-          border: "#1b2437",
-          amber: "#f59e0b", // Tier 2 HITL alert
-          green: "#22c55e", // healthy / PASS badge
-          red: "#ef4444", // halted / SLA breach
-          accent: "#38bdf8", // active node highlight
+          bg: "#101010",
+          panel: "#171717",
+          raised: "#202020",
+          line: "#303030",
+          muted: "#8b8b8b",
+          
+          text: "#f1f1f1",
+          cyan: "#d7d7d7",
+          amber: "#f2b84b",
+          green: "#7ed6a3",
+          red: "#ff6b5f",
+          violet: "#b7a3e8",
         },
       },
       fontFamily: {
-        mono: ["ui-monospace", "SFMono-Regular", "Menlo", "Consolas", "monospace"],
+        sans: ["var(--font-sans)", "system-ui", "sans-serif"],
+        display: ["var(--font-display)", "system-ui", "sans-serif"],
+        mono: ["var(--font-mono)", "ui-monospace", "monospace"],
       },
     },
   },
   plugins: [],
 };
-
 export default config;
