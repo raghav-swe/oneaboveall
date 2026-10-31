@@ -1,18 +1,21 @@
 "use client";
 
 /**
- * OAA global context (CONTEXT.md §4.1 / §6, PROMPTS.md Phase 6).
+ * OAA global context.
  *
- * Owns the whole live surface of the control plane:
- *
+ * Owns the live surface of the control plane:
  *   * the active incident id,
- *   * the latest per-node SSE event map (`node_events`),
- *   * the merged live `OAAState` snapshot assembled from those events,
- *   * the end-to-end SLA stopwatch (< 20.0 s target),
- *   * the incident-list + runtime-config caches,
- *   * the `useIncidentSSE` hook (native `EventSource` against the relative
- *     `/api/v1/incidents/{id}/stream` URL, so the Next.js `rewrites()` proxy
- *     carries the traffic — no CORS, no SSE buffering).
+ *   * the latest per-node SSE event map,
+ *   * the merged live `OAAState` snapshot,
+ *   * the end-to-end SLA stopwatch,
+ *   * the incident-list + runtime-config caches.
+ *
+ * It has two modes:
+ *   * **live** — native `EventSource` against `/api/v1/incidents/{id}/stream`
+ *     through the Next.js rewrite proxy (localhost / any real backend).
+ *   * **demo** — the gateway is unreachable (e.g. the Vercel build), so the
+ *     chaos launcher replays a scripted node timeline from `demoData.ts`.
+ *     Visually identical, so the deployed demo never shows a dead screen.
  */
 
 import {
@@ -26,10 +29,11 @@ import {
   type ReactNode,
 } from "react";
 
+import { apiGet, apiPost, demoConfig, demoIncidentList } from "@/lib/api";
+import { DEMO_RUNS } from "@/lib/demoData";
 import type {
   ApproveResponse,
   GlobalStatus,
-  IncidentListResponse,
   IncidentRow,
   IngestResponse,
   LastHealthySummary,
@@ -41,26 +45,17 @@ import type {
   SSETerminalEvent,
 } from "@/types/oaa";
 
-/** End-to-end SLA target (CONTEXT.md §3, guardrail 3). */
 export const SLA_TARGET_SECONDS = 20.0;
-
-/** Reconnect backoff for the SSE stream (native EventSource auto-retry is
- *  deliberately re-implemented so a closed stream can be restarted cleanly). */
 export const RECONNECT_BASE_DELAY_MS = 1200;
 export const RECONNECT_MAX_DELAY_MS = 8000;
 
 export type HitlDecisionPayload = "APPROVED" | "REJECTED";
 
 export interface SlaState {
-  /** Elapsed wall-clock seconds since ingestion (frozen once SLA is reached). */
   elapsed: number;
-  /** True while the stopwatch is still counting. */
   running: boolean;
-  /** True once the stopwatch froze (stabilization / interrupt / terminal). */
   frozen: boolean;
-  /** True when the SLA target has been breached. */
   breached: boolean;
-  /** Epoch ms of the ingestion moment (null when idle). */
   startedAt: number | null;
 }
 
@@ -68,6 +63,7 @@ export interface UseIncidentSSEOptions {
   onEvent?: (event: SSEEvent) => void;
   onOpen?: () => void;
   onError?: () => void;
+  enabled?: boolean;
 }
 
 export interface UseIncidentSSEResult {
@@ -75,18 +71,14 @@ export interface UseIncidentSSEResult {
 }
 
 /**
- * Subscribe to one incident's SSE stream.
- *
- * The native `EventSource` is pointed at the **relative** URL
- * `/api/v1/incidents/{id}/stream` so the request travels through the Next.js
- * `rewrites()` proxy to the FastAPI gateway. On a transport error the hook
- * reconnects with a bounded backoff; a terminal event closes the stream for
- * good (the backend also closes it server-side).
+ * Subscribe to one incident's SSE stream (relative URL → Next.js rewrite → FastAPI).
+ * Reconnects with bounded backoff; a terminal event closes the stream for good.
  */
 export function useIncidentSSE(
   incidentId: string | null,
   options: UseIncidentSSEOptions = {},
 ): UseIncidentSSEResult {
+  const { enabled = true } = options;
   const handlersRef = useRef<UseIncidentSSEOptions>(options);
   handlersRef.current = options;
 
@@ -96,7 +88,7 @@ export function useIncidentSSE(
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    if (!incidentId) {
+    if (!incidentId || !enabled) {
       setConnected(false);
       return;
     }
@@ -138,12 +130,10 @@ export function useIncidentSSE(
         try {
           payload = JSON.parse(message.data) as SSEEvent;
         } catch {
-          return; // heartbeat comments and malformed frames are ignored
+          return;
         }
         handlersRef.current.onEvent?.(payload);
-        if (payload.event === "terminal") {
-          close();
-        }
+        if (payload.event === "terminal") close();
       };
 
       source.onerror = () => {
@@ -160,42 +150,28 @@ export function useIncidentSSE(
 
     connect();
     return close;
-  }, [incidentId]);
+  }, [incidentId, enabled]);
 
   return { connected };
 }
 
 export interface OAAContextValue {
-  /** The incident currently streamed by the war room (null when idle). */
   activeIncidentId: string | null;
   setActiveIncidentId: (incidentId: string | null) => void;
-  /** Latest SSE event per node id (1..10). */
   nodeEvents: Record<number, SSENodeEvent>;
-  /** Merged live state snapshot assembled from the SSE events. */
   state: OAAStateSnapshot;
-  /** Global status pill state. */
   status: GlobalStatus;
-  /** True while the Tier 2 HITL gate is armed (Node 6 paused). */
   hitlPaused: boolean;
-  /** SLA stopwatch. */
   sla: SlaState;
-  /** Cached ticket list (`GET /api/v1/incidents`). */
   incidents: IncidentRow[];
-  /** Digest of the last RESOLVED ticket (idle dashboard bento). */
   lastHealthySummary: LastHealthySummary | null;
-  /** Runtime governance config (`GET /api/v1/config`). */
   config: RuntimeConfigModel | null;
-  /** Live SSE connection state. */
   connected: boolean;
-  /** Last transport/action error (surfaced in the top bar). */
+  /** True when the gateway is unreachable and the UI is replaying fixtures. */
+  demoMode: boolean;
   error: string | null;
-  /** Chaos launcher → `POST /api/v1/incidents/ingest`. */
   ingest: (scenarioKey: ScenarioKey) => Promise<void>;
-  /** HITL gate → `POST /api/v1/incidents/{id}/approve`. */
-  approve: (
-    incidentId: string,
-    decision: HitlDecisionPayload,
-  ) => Promise<boolean>;
+  approve: (incidentId: string, decision: HitlDecisionPayload) => Promise<boolean>;
   refreshIncidents: () => Promise<void>;
   refreshConfig: () => Promise<void>;
   clearError: () => void;
@@ -203,11 +179,7 @@ export interface OAAContextValue {
 
 const OAAContext = createContext<OAAContextValue | null>(null);
 
-/**
- * Merge one incremental node update into the accumulated live state.
- * `debate_transcript` uses LangGraph's `operator.add` reducer, so the SSE
- * frames carry deltas that must be concatenated (not replaced).
- */
+/** Merge one incremental node update. `debate_transcript` uses an add-reducer. */
 export function mergeState(
   previous: OAAStateSnapshot,
   update: Partial<OAAStateSnapshot> | undefined,
@@ -233,40 +205,71 @@ export function OAAProvider({ children }: { children: ReactNode }) {
   const [terminalStatus, setTerminalStatus] = useState<string | null>(null);
   const [hitlResolved, setHitlResolved] = useState(false);
   const [incidents, setIncidents] = useState<IncidentRow[]>([]);
-  const [lastHealthySummary, setLastHealthySummary] = useState<LastHealthySummary | null>(
-    null,
-  );
+  const [lastHealthySummary, setLastHealthySummary] = useState<LastHealthySummary | null>(null);
   const [config, setConfig] = useState<RuntimeConfigModel | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [demoMode, setDemoMode] = useState(false);
   const [slaStartedAt, setSlaStartedAt] = useState<number | null>(null);
   const [slaFrozenAt, setSlaFrozenAt] = useState<number | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
 
+  const demoTimers = useRef<number[]>([]);
+  const demoRunRef = useRef<ScenarioKey | null>(null);
+  const demoCountRef = useRef(0);
+
+  const clearDemoTimers = useCallback(() => {
+    demoTimers.current.forEach((t) => window.clearTimeout(t));
+    demoTimers.current = [];
+  }, []);
+
   const refreshIncidents = useCallback(async () => {
-    try {
-      const response = await fetch("/api/v1/incidents", { cache: "no-store" });
-      if (!response.ok) return;
-      const payload = (await response.json()) as IncidentListResponse;
-      setIncidents(payload.incidents ?? []);
-      setLastHealthySummary(payload.last_healthy_summary ?? null);
-    } catch {
-      /* the ledger cache is best-effort */
-    }
+    const { data, live } = await apiGet("/api/v1/incidents", demoIncidentList());
+    setIncidents(data.incidents ?? []);
+    setLastHealthySummary(data.last_healthy_summary ?? null);
+    if (!live) setDemoMode(true);
   }, []);
 
   const refreshConfig = useCallback(async () => {
-    try {
-      const response = await fetch("/api/v1/config", { cache: "no-store" });
-      if (!response.ok) return;
-      const payload = (await response.json()) as RuntimeConfigModel;
-      setConfig(payload);
-    } catch {
-      /* config chips are best-effort */
-    }
+    const { data, live } = await apiGet("/api/v1/config", demoConfig());
+    setConfig(data);
+    if (!live) setDemoMode(true);
   }, []);
 
   const refreshIncidentsRef = useRef(refreshIncidents);
   refreshIncidentsRef.current = refreshIncidents;
+
+  const activeIncidentRef = useRef<string | null>(null);
+  activeIncidentRef.current = activeIncidentId;
+
+  /**
+   * Backfill node states from the ledger once a run ends.
+   *
+   * SSE is fire-and-forget: a subscriber that attaches a beat late (fresh tab,
+   * slow hydration) misses the first frames. On the terminal event we reconcile
+   * against the recorded snapshot chain so the scrubber is always complete.
+   */
+  const reconcileFromSnapshots = useCallback(async (incidentId: string) => {
+    const { data, live } = await apiGet<{ snapshots: { node_id: number; status: string }[] }>(
+      `/api/v1/incidents/${encodeURIComponent(incidentId)}/snapshots`,
+      { snapshots: [] },
+    );
+    if (!live || !data.snapshots?.length) return;
+    setNodeEvents((previous) => {
+      const next = { ...previous };
+      for (const row of data.snapshots) {
+        next[row.node_id] = {
+          event: "node_update",
+          node_id: row.node_id,
+          status: row.status === "HALTED" ? "HALTED" : "COMPLETED",
+          state: {},
+        };
+      }
+      return next;
+    });
+  }, []);
+
+  const reconcileFromSnapshotsRef = useRef(reconcileFromSnapshots);
+  reconcileFromSnapshotsRef.current = reconcileFromSnapshots;
 
   const handleEvent = useCallback((event: SSEEvent) => {
     if (event.event === "terminal") {
@@ -274,6 +277,8 @@ export function OAAProvider({ children }: { children: ReactNode }) {
       setTerminalStatus(terminal.status);
       setSlaFrozenAt((previous) => previous ?? Date.now());
       void refreshIncidentsRef.current();
+      const incidentId = activeIncidentRef.current;
+      if (incidentId) void reconcileFromSnapshotsRef.current(incidentId);
       return;
     }
     if (event.event !== "node_update") return;
@@ -282,8 +287,6 @@ export function OAAProvider({ children }: { children: ReactNode }) {
     setNodeEvents((previous) => ({ ...previous, [nodeEvent.node_id]: nodeEvent }));
     setState((previous) => mergeState(previous, nodeEvent.state));
 
-    // SLA stopwatch: starts on the first ingest frame, freezes at the HITL
-    // interrupt or at live-service stabilization.
     setSlaStartedAt((previous) => previous ?? Date.now());
     if (nodeEvent.status === "PAUSED") {
       setSlaFrozenAt((previous) => previous ?? Date.now());
@@ -293,35 +296,52 @@ export function OAAProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const { connected } = useIncidentSSE(activeIncidentId, { onEvent: handleEvent });
+  const handleEventRef = useRef(handleEvent);
+  handleEventRef.current = handleEvent;
 
-  // Ticking clock for the SLA stopwatch (100 ms resolution).
-  useEffect(() => {
-    if (slaStartedAt === null) return;
-    const timer = setInterval(() => setNow(Date.now()), 100);
-    return () => clearInterval(timer);
-  }, [slaStartedAt]);
-
-  // Bootstrap the idle caches (ledger + governance chips).
-  useEffect(() => {
-    void refreshIncidents();
-    void refreshConfig();
-  }, [refreshIncidents, refreshConfig]);
-
-  const ingest = useCallback(async (scenarioKey: ScenarioKey) => {
-    setError(null);
-    try {
-      const response = await fetch("/api/v1/incidents/ingest", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scenario_key: scenarioKey }),
+  // ---- demo replay --------------------------------------------------------
+  const scheduleSteps = useCallback(
+    (
+      steps: (typeof DEMO_RUNS)[ScenarioKey]["before_pause"],
+      startAt: number,
+      onDone?: () => void,
+    ): number => {
+      let cursor = startAt;
+      steps.forEach((step) => {
+        cursor += step.delay_ms;
+        demoTimers.current.push(
+          window.setTimeout(() => {
+            handleEventRef.current({
+              event: "node_update",
+              node_id: step.node_id,
+              status: step.status,
+              state: step.state,
+            } as SSENodeEvent);
+          }, cursor),
+        );
       });
-      if (!response.ok) {
-        throw new Error(`ingest failed with HTTP ${response.status}`);
-      }
-      const payload = (await response.json()) as IngestResponse;
+      if (onDone) demoTimers.current.push(window.setTimeout(onDone, cursor + 200));
+      return cursor;
+    },
+    [],
+  );
 
-      setActiveIncidentId(payload.incident_id);
+  const finishDemo = useCallback((key: ScenarioKey) => {
+    const run = DEMO_RUNS[key];
+    setTerminalStatus(run.final_status);
+    setSlaFrozenAt((previous) => previous ?? Date.now());
+  }, []);
+
+  const startDemoRun = useCallback(
+    (key: ScenarioKey) => {
+      clearDemoTimers();
+      demoRunRef.current = key;
+      demoCountRef.current += 1;
+      const incidentId = `INC-${4820 + demoCountRef.current}`;
+      const run = DEMO_RUNS[key];
+
+      setDemoMode(true);
+      setActiveIncidentId(incidentId);
       setNodeEvents({});
       setState({});
       setTerminalStatus(null);
@@ -329,40 +349,142 @@ export function OAAProvider({ children }: { children: ReactNode }) {
       setSlaStartedAt(Date.now());
       setSlaFrozenAt(null);
       setNow(Date.now());
-      void refreshIncidentsRef.current();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    }
-  }, []);
+      setError(null);
+
+      const pausesAtGate = run.before_pause.some((step) => step.status === "PAUSED");
+      const elapsed = scheduleSteps(run.before_pause, 0, pausesAtGate ? undefined : () => {
+        scheduleSteps(run.after_pause, 0, () => finishDemo(key));
+      });
+
+      // Record the ticket in the drawer once the run begins.
+      const service = String(
+        (run.before_pause.find((s) => s.state?.service)?.state.service as string) ?? "service",
+      );
+      setTimeout(() => {
+        setIncidents((previous) => [
+          {
+            incident_id: incidentId,
+            service,
+            alert_name: "Simulated",
+            status: pausesAtGate ? "PAUSED_HITL" : "RUNNING",
+            selected_tier: run.tier as IncidentRow["selected_tier"],
+            blast_radius_score: run.blast,
+            is_code_bug: key === "SCENARIO_3_CODE_BUG" ? 1 : 0,
+            strike_count: 0,
+            max_strikes_override: 3,
+            created_at: new Date().toISOString(),
+            final_report_md: null,
+          },
+          ...previous.filter((i) => i.incident_id !== incidentId),
+        ]);
+      }, Math.min(elapsed, 400));
+    },
+    [clearDemoTimers, finishDemo, scheduleSteps],
+  );
+
+  const resumeDemo = useCallback(
+    (decision: HitlDecisionPayload) => {
+      const key = demoRunRef.current;
+      if (!key) return;
+      setHitlResolved(true);
+      if (decision === "REJECTED") {
+        // Rejection routes straight to reporting, skipping execution.
+        handleEventRef.current({
+          event: "node_update",
+          node_id: 6,
+          status: "COMPLETED",
+          state: { sandbox_result: {}, hitl_decision: "REJECTED" },
+        } as SSENodeEvent);
+        scheduleSteps(
+          DEMO_RUNS[key].after_pause.filter((s) => s.node_id === 9 || s.node_id === 10),
+          0,
+          () => finishDemo(key),
+        );
+        return;
+      }
+      scheduleSteps(DEMO_RUNS[key].after_pause, 0, () => finishDemo(key));
+    },
+    [finishDemo, scheduleSteps],
+  );
+
+  // ---- SSE (live mode only) ----------------------------------------------
+  const { connected } = useIncidentSSE(activeIncidentId, {
+    onEvent: handleEvent,
+    enabled: !demoMode,
+  });
+
+  useEffect(() => {
+    if (slaStartedAt === null) return;
+    const timer = setInterval(() => setNow(Date.now()), 100);
+    return () => clearInterval(timer);
+  }, [slaStartedAt]);
+
+  useEffect(() => {
+    void refreshIncidents();
+    void refreshConfig();
+  }, [refreshIncidents, refreshConfig]);
+
+  useEffect(() => clearDemoTimers, [clearDemoTimers]);
+
+  const ingest = useCallback(
+    async (scenarioKey: ScenarioKey) => {
+      setError(null);
+      try {
+        const response = await fetch("/api/v1/incidents/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scenario_key: scenarioKey }),
+        });
+        if (!response.ok) throw new Error(`ingest failed with HTTP ${response.status}`);
+        const payload = (await response.json()) as IngestResponse;
+
+        setDemoMode(false);
+        setActiveIncidentId(payload.incident_id);
+        setNodeEvents({});
+        setState({});
+        setTerminalStatus(null);
+        setHitlResolved(false);
+        setSlaStartedAt(Date.now());
+        setSlaFrozenAt(null);
+        setNow(Date.now());
+        void refreshIncidentsRef.current();
+      } catch {
+        startDemoRun(scenarioKey);
+      }
+    },
+    [startDemoRun],
+  );
 
   const approve = useCallback(
     async (incidentId: string, decision: HitlDecisionPayload): Promise<boolean> => {
       setError(null);
+      if (demoMode) {
+        resumeDemo(decision);
+        return true;
+      }
       try {
-        const response = await fetch(`/api/v1/incidents/${encodeURIComponent(incidentId)}/approve`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ decision }),
-        });
-        if (!response.ok) {
-          const detail = await response.text();
-          throw new Error(`approve failed with HTTP ${response.status}: ${detail}`);
+        const { data, live } = await apiPost<ApproveResponse>(
+          `/api/v1/incidents/${encodeURIComponent(incidentId)}/approve`,
+          { decision },
+          { incident_id: incidentId, status: "RESUMED" },
+        );
+        if (!live) {
+          resumeDemo(decision);
+          return true;
         }
-        const payload = (await response.json()) as ApproveResponse;
         setHitlResolved(true);
         void refreshIncidentsRef.current();
-        return payload.status === "RESUMED";
-      } catch (caught) {
-        setError(caught instanceof Error ? caught.message : String(caught));
+        return data.status === "RESUMED";
+      } catch {
+        setError("approve failed");
         return false;
       }
     },
-    [],
+    [demoMode, resumeDemo],
   );
 
   const sla = useMemo<SlaState>(() => {
-    const elapsed =
-      slaStartedAt === null ? 0 : ((slaFrozenAt ?? now) - slaStartedAt) / 1000;
+    const elapsed = slaStartedAt === null ? 0 : ((slaFrozenAt ?? now) - slaStartedAt) / 1000;
     return {
       elapsed,
       running: slaStartedAt !== null && slaFrozenAt === null,
@@ -393,6 +515,7 @@ export function OAAProvider({ children }: { children: ReactNode }) {
       lastHealthySummary,
       config,
       connected,
+      demoMode,
       error,
       ingest,
       approve,
@@ -411,6 +534,7 @@ export function OAAProvider({ children }: { children: ReactNode }) {
       lastHealthySummary,
       config,
       connected,
+      demoMode,
       error,
       ingest,
       approve,
@@ -424,8 +548,6 @@ export function OAAProvider({ children }: { children: ReactNode }) {
 
 export function useOAA(): OAAContextValue {
   const context = useContext(OAAContext);
-  if (!context) {
-    throw new Error("useOAA() must be used inside <OAAProvider>.");
-  }
+  if (!context) throw new Error("useOAA() must be used inside <OAAProvider>.");
   return context;
 }

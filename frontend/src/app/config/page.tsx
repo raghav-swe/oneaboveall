@@ -17,7 +17,7 @@ const MUTATING: { key: ToolKey; label: string; note: string }[] = [
 ];
 
 export default function Page() {
-  const { config, refreshConfig } = useOAA();
+  const { config, refreshConfig, demoMode } = useOAA();
   const [draft, setDraft] = useState<RuntimeConfigModel | null>(config);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -35,6 +35,16 @@ export default function Page() {
     setDraft(next); // optimistic
     setSaving(true);
     setMessage(null);
+
+    // Offline demo (e.g. Vercel): keep the optimistic value so the control
+    // room stays interactive instead of rolling back to a value the user
+    // just changed.
+    if (demoMode) {
+      setSaving(false);
+      setMessage({ kind: "ok", text: "Configuration committed — applies to all future runs." });
+      return;
+    }
+
     try {
       const res = await fetch("/api/v1/config", {
         method: "PUT",

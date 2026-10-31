@@ -60,6 +60,7 @@ export default function Page() {
   });
   const doneCount = nodeStates.filter((s) => s === "done").length;
 
+  const activeRow = incidents.find((i) => i.incident_id === activeIncidentId);
   const pill =
     status === "TIER_2_PAUSED"
       ? { cls: "tag tag-warn", text: "● TIER 2 · HITL PAUSED" }
@@ -115,7 +116,9 @@ export default function Page() {
       <section className="panel flex flex-wrap items-center gap-3 p-3">
         <span className={pill.cls}>{pill.text}</span>
         <span className="data">{activeIncidentId ?? "—"}</span>
-        <span className="text-sm text-[var(--muted)]">{state.service ?? lastHealthySummary?.service ?? "no active incident"}</span>
+        <span className="text-sm text-[var(--muted)]">
+          {state.service ?? activeRow?.service ?? lastHealthySummary?.service ?? "no active incident"}
+        </span>
         <span className="ml-auto data text-[var(--accent)]">
           SLA {sla.elapsed.toFixed(2)}s / 20.0s {sla.breached ? "· BREACH" : sla.frozen ? "· frozen" : ""}
         </span>

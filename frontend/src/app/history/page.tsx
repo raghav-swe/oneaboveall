@@ -5,7 +5,8 @@ import DagCanvas, { type PipelineNode, type PipelineState } from "@/components/h
 import TicketList from "@/components/history/TicketList";
 import TicketOverridePanel from "@/components/history/TicketOverridePanel";
 import PostMortemModal from "@/components/shared/PostMortemModal";
-import type { IncidentRow, IncidentListResponse, NodeSnapshotRow } from "@/types/oaa";
+import { apiGet, apiPost, demoIncidentList, demoSnapshots } from "@/lib/api";
+import type { IncidentRow, NodeSnapshotRow } from "@/types/oaa";
 
 const NODE_NAMES: Record<number, string> = {
   1: "1. Ingestion",
@@ -41,9 +42,7 @@ export default function Page() {
   selectedIdRef.current = selectedId;
 
   const loadTickets = useCallback(async (keepSelection = true) => {
-    const res = await fetch("/api/v1/incidents", { cache: "no-store" });
-    if (!res.ok) return;
-    const body = (await res.json()) as IncidentListResponse;
+    const { data: body } = await apiGet("/api/v1/incidents", demoIncidentList());
     const rows = body.incidents ?? [];
     setTickets(rows);
     setLoadingTickets(false);
@@ -55,14 +54,10 @@ export default function Page() {
   const loadSnapshots = useCallback(async (incidentId: string) => {
     setLoadingSnapshots(true);
     try {
-      const res = await fetch(`/api/v1/incidents/${encodeURIComponent(incidentId)}/snapshots`, {
-        cache: "no-store",
-      });
-      if (!res.ok) {
-        setSnapshots([]);
-        return;
-      }
-      const body = (await res.json()) as { snapshots: NodeSnapshotRow[] };
+      const { data: body } = await apiGet(
+        `/api/v1/incidents/${encodeURIComponent(incidentId)}/snapshots`,
+        { incident_id: incidentId, snapshots: demoSnapshots(incidentId) },
+      );
       setSnapshots(body.snapshots ?? []);
       setRevealedCount(body.snapshots?.length ?? 0); // page starts fully lit
       // Focus the most recent node in the chain (Node 8 for halted tickets).
@@ -148,6 +143,55 @@ export default function Page() {
   const step = () => {
     setPlaying(false);
     setRevealedCount((n) => Math.min(n + 1, snapshots.length));
+  };
+
+  /** 4th-strike retry: live POST when the gateway exists, simulated rows otherwise. */
+  const retryStrike = async (hint: string): Promise<string> => {
+    if (!selected) return "No ticket selected.";
+    const incidentId = selected.incident_id;
+    const { data, live } = await apiPost<{ incident_id: string; max_strikes: number; status: string }>(
+      `/api/v1/incidents/${encodeURIComponent(incidentId)}/retry-strike`,
+      { prompt_hint: hint },
+      { incident_id: incidentId, max_strikes: 4, status: "RETRIED_RESOLVED" },
+    );
+
+    if (live) {
+      await loadSnapshots(incidentId);
+      await loadTickets(true);
+      return `4th strike granted → ${data.status} (max_strikes=${data.max_strikes})`;
+    }
+
+    // Offline demo: append the strike-4 chain so the canvas animates 8 → 9 → 10.
+    const base = snapshots.length ? snapshots[snapshots.length - 1].id : 0;
+    const stamp = new Date().toISOString();
+    const extra: NodeSnapshotRow[] = [8, 9, 10].map((nodeId, index) => ({
+      id: base + index + 1,
+      incident_id: incidentId,
+      node_id: nodeId,
+      node_name:
+        nodeId === 8 ? "gitops_pr_node" : nodeId === 9 ? "shared_reporting_node" : "flight_ledger_node",
+      status: "COMPLETED",
+      elapsed_ms: 900 - index * 250,
+      state_json: JSON.stringify({
+        incident_id: incidentId,
+        strike_count: 4,
+        hint,
+        note: "4th strike granted from the override console",
+      }),
+      timestamp: stamp,
+    }));
+    const merged = [...snapshots, ...extra];
+    setSnapshots(merged);
+    setRevealedCount(merged.length);
+    setSelectedNodeId(8);
+    setTickets((previous) =>
+      previous.map((t) =>
+        t.incident_id === incidentId
+          ? { ...t, status: "RESOLVED", strike_count: 4, max_strikes_override: 4 }
+          : t,
+      ),
+    );
+    return "4th strike granted → RETRIED_RESOLVED (max_strikes=4)";
   };
   const rewind = () => {
     setPlaying(false);
@@ -270,14 +314,7 @@ export default function Page() {
           </div>
 
           {selected && (
-            <TicketOverridePanel
-              incident={selected}
-              snapshots={snapshots}
-              onRetried={async () => {
-                await loadSnapshots(selected.incident_id);
-                await loadTickets(true);
-              }}
-            />
+            <TicketOverridePanel incident={selected} snapshots={snapshots} onSubmit={retryStrike} />
           )}
         </aside>
       </div>

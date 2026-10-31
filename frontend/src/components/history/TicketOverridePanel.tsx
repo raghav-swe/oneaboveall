@@ -6,16 +6,11 @@ import type { IncidentRow, NodeSnapshotRow } from "@/types/oaa";
 interface TicketOverridePanelProps {
   incident: IncidentRow;
   snapshots: NodeSnapshotRow[];
-  onRetried: () => Promise<void>;
+  /** Returns the message to show after the attempt (live or simulated). */
+  onSubmit: (hint: string) => Promise<string>;
 }
 
-interface RetryResponse {
-  incident_id: string;
-  max_strikes: number;
-  status: string;
-}
-
-export default function TicketOverridePanel({ incident, snapshots, onRetried }: TicketOverridePanelProps) {
+export default function TicketOverridePanel({ incident, snapshots, onSubmit }: TicketOverridePanelProps) {
   const [hint, setHint] = useState("Use dict.get('tax', 0.0)");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
@@ -41,15 +36,7 @@ export default function TicketOverridePanel({ incident, snapshots, onRetried }: 
     setBusy(true);
     setResult(null);
     try {
-      const res = await fetch(`/api/v1/incidents/${encodeURIComponent(incident.incident_id)}/retry-strike`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt_hint: hint }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      const body = (await res.json()) as RetryResponse;
-      setResult(`4th strike granted → ${body.status} (max_strikes=${body.max_strikes})`);
-      await onRetried();
+      setResult(await onSubmit(hint));
     } catch (err) {
       setResult(`Retry failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {

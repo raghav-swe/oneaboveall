@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { useOAA } from "@/context/OAAContext";
+import { apiGet, apiPost, demoConfig, demoIncidentList } from "@/lib/api";
 import type { IncidentListResponse, QuickFixAction, RuntimeConfigModel } from "@/types/oaa";
 
 const FIXES: { action: QuickFixAction; title: string; desc: string; button: string }[] = [
@@ -46,6 +48,7 @@ const FAQ = [
 ];
 
 export default function Page() {
+  const { demoMode } = useOAA();
   const [busy, setBusy] = useState<QuickFixAction | null>(null);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [openFaq, setOpenFaq] = useState<number | null>(0);
@@ -54,14 +57,21 @@ export default function Page() {
     setBusy(action);
     setToast(null);
     try {
-      const res = await fetch("/api/v1/support/quick-fix", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      const body = (await res.json()) as { status: string; message: string; timestamp: string };
-      setToast({ kind: "ok", text: `${body.status} — ${body.message}` });
+      const { data, live } = await apiPost<{ status: string; message: string; timestamp: string }>(
+        "/api/v1/support/quick-fix",
+        { action },
+        {
+          status: "SUCCESS",
+          message: "Action completed (offline demo).",
+          timestamp: new Date().toISOString(),
+        },
+      );
+      const offline =
+        !live &&
+        (action === "PURGE_SANDBOX" || action === "ENABLE_MOCK_ENV"
+          ? "Simulated — no cluster reachable."
+          : "Simulated — no gateway reachable.");
+      setToast({ kind: "ok", text: `${data.status} — ${live ? data.message : offline}` });
     } catch (err) {
       setToast({ kind: "err", text: `Failed: ${err instanceof Error ? err.message : String(err)}` });
     } finally {
@@ -72,20 +82,19 @@ export default function Page() {
   const downloadBundle = async () => {
     setToast(null);
     try {
-      const [incidentsRes, configRes] = await Promise.all([
-        fetch("/api/v1/incidents", { cache: "no-store" }),
-        fetch("/api/v1/config", { cache: "no-store" }),
+      const [{ data: incidents }, { data: config }] = await Promise.all([
+        apiGet<IncidentListResponse>("/api/v1/incidents", demoIncidentList()),
+        apiGet<RuntimeConfigModel>("/api/v1/config", demoConfig()),
       ]);
-      const incidents = (await incidentsRes.json()) as IncidentListResponse;
-      const config = (await configRes.json()) as RuntimeConfigModel;
 
       const latest = incidents.incidents?.[0];
       let snapshots: unknown = [];
       if (latest) {
-        const snapRes = await fetch(`/api/v1/incidents/${encodeURIComponent(latest.incident_id)}/snapshots`, {
-          cache: "no-store",
-        });
-        if (snapRes.ok) snapshots = (await snapRes.json()).snapshots;
+        const { data } = await apiGet<{ snapshots: unknown }>(
+          `/api/v1/incidents/${encodeURIComponent(latest.incident_id)}/snapshots`,
+          { snapshots: [] },
+        );
+        snapshots = data.snapshots;
       }
 
       const bundle = {
