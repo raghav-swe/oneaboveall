@@ -12,7 +12,7 @@ export default function Sidebar() {
   const pathname = usePathname();
   return (
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark">O</span><span><b>oneaboveall</b><small>AI OPERATIONS</small></span></div>
+      <div className="brand"><img src="/logo.svg" alt="OneAboveAll" className="brand-logo" width={31} height={31} /><span><b>oneaboveall</b><small>AI OPERATIONS</small></span></div>
       <div className="workspace-pill"><span className="live-dot" /> production <span className="chevron">⌄</span></div>
       <nav aria-label="Main navigation">
         <p className="nav-label">Workspace</p>
