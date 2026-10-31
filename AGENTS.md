@@ -35,10 +35,13 @@ Autonomous SRE control plane (hackathon build). Agentic incident response with g
 - Minimal changes per phase; no future-phase files beyond listed inert stubs.
 
 ## Current state
-Phase 6 committed (`Phase 6: Next.js dark shell, SSE context, dashboard 5-bento war room`). Next: **Phase 7** (Page 2 `/history` — Blackbox ticket drawer, `@xyflow/react` n8n-style 10-node DAG replay with Play/Pause/Step, node inspector JSON, and the 4th-strike override console) — prompt lives in `PROMPTS.md`.
+Phases 7 + 8 committed (`Phase 8: Config governance, support self-healing, full E2E regression`), on top of the `frontend-design` refresh. All four pages are live against the real backend and the demo path is green. Next: demo polish only.
 
-Phase 6 notes for future sessions:
-- Frontend shell is live: `next.config.ts` holds the `/api/*` → `:8000` `rewrites()` proxy plus `compress: false`.
-  **Do not re-enable compression** — Next's gzip middleware buffers `text/event-stream` frames into one burst at the end of the response, which silently kills live SSE rendering on `/dashboard` and `/history`. Verified by frame-arrival timing through the proxy vs. the backend direct.
-- `src/context/OAAContext.tsx` owns the live surface: `useIncidentSSE` (native `EventSource` on the relative `/api/v1/incidents/{id}/stream`, backoff reconnect, close on terminal), the merged `OAAStateSnapshot` (concatenates `debate_transcript` deltas), the SLA stopwatch, and the incident/config caches. Phase 7 should subscribe through this context rather than opening its own stream.
-- Node 6 re-executes its body on `interrupt()` resume, so it publishes a second `PAUSED` event after approval — the context's `hitlResolved` flag exists to stop the status pill from re-arming the amber gate. Reuse that pattern for the Phase 7 replay.
+Notes for future sessions:
+- **Design source of truth is Naitik's `frontend-design` branch** (`components/dashboard/*`, `components/history/*`, `lib/mockData.ts`, `lib/types.ts`, `docs/spec-*.md`). His branch also downgrades Next 15→14 / React 19→18 and adds duplicate `next.config.mjs` / `postcss.config.mjs`; we deliberately took **his `src/` + `tailwind.config.ts` + docs only** and kept the Next 15 toolchain. Do not reintroduce the `.mjs` configs (two config files break the build).
+- `next.config.ts` must keep `compress: false` + the `/api/*` rewrite. Next's gzip buffers `text/event-stream` into one burst at the end, which silently freezes the live War Room.
+- `src/context/OAAContext.tsx` still owns the live surface (`useIncidentSSE`, merged `OAAStateSnapshot`, SLA stopwatch, config cache). The redesigned dashboard reads it via `useOAA()`; his original pages were mock-data only.
+- `/history` replay is driven by `GET /api/v1/incidents/{id}/snapshots` (`revealedCount` = rows lit). Node ids repeat legitimately (node 2 = debate R1/R3, node 8 = one row per strike), so replay walks **rows**, not the 10 node ids.
+- The DAG is the **simplified 10-node pipeline** (`DAG_LAYOUT` in `components/history/DagCanvas.tsx`), chosen by the user over the 13-node `LOCKED_DAG_NODES`. If the spec lock is ever enforced, restore those coordinates.
+- `retry-strike` is still synchronous; the override panel re-fetches snapshots after the POST returns instead of live-streaming N8→N9→N10. Still pending if true live animation is ever required: fire-and-forget + flip status to `RUNNING` before replying + a `?follow=1` stream flag.
+- Governance caveat: the `/config` slider floor is 0.15, but S1's B is 0.067 and S3's is 0.04 — **no scenario can be forced to Tier 2 via the slider**. The Phase 8 "set 0.15 → S1 forced Tier 2" check is mathematically impossible; demonstrate the firewall side-effect (disable `restart_pod`) instead.
